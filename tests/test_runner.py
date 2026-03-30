@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -53,7 +54,7 @@ def test_parse_container_output_json_not_on_last_line():
 
 
 # ---------------------------------------------------------------------------
-# run_sandbox
+# run_sandbox (with pre-download step)
 # ---------------------------------------------------------------------------
 
 def _make_item(**overrides) -> QueueItem:
@@ -85,10 +86,12 @@ def test_run_sandbox_returns_sandbox_result(
         "file_accesses": [],
     })
 
-    # First call: docker image inspect (raise to trigger build)
-    # Second call: docker run
+    # 1: docker image inspect (fail -> trigger build)
+    # 2: npm pack (pre-download)
+    # 3: docker run
     mock_subprocess_run.side_effect = [
         subprocess.CalledProcessError(1, "docker"),
+        MagicMock(returncode=0),  # npm pack
         MagicMock(stdout=container_output + "\n", stderr="", returncode=0),
     ]
 
@@ -100,9 +103,6 @@ def test_run_sandbox_returns_sandbox_result(
     mock_build.assert_called_once()
 
 
-import subprocess  # noqa: E402 (needed for CalledProcessError in side_effect)
-
-
 @patch("dependabot_plus.sandbox.runner.generate_canary_files")
 @patch("dependabot_plus.sandbox.runner.generate_canary_env")
 @patch("dependabot_plus.sandbox.runner.subprocess.run")
@@ -112,16 +112,17 @@ def test_docker_command_includes_network_none(
     mock_canary_env.return_value = {"TOK": "val"}
     mock_canary_files.return_value = {}
 
-    # First call succeeds (image exists), second is docker run
+    # 1: docker image inspect, 2: npm pack, 3: docker run
     mock_subprocess_run.side_effect = [
-        MagicMock(),  # docker image inspect
-        MagicMock(stdout="{}\n", stderr="", returncode=0),  # docker run
+        MagicMock(),
+        MagicMock(returncode=0),
+        MagicMock(stdout="{}\n", stderr="", returncode=0),
     ]
 
     run_sandbox(_make_item())
 
-    # The docker run call is the second one
-    docker_run_call = mock_subprocess_run.call_args_list[1]
+    # The docker run call is the third one
+    docker_run_call = mock_subprocess_run.call_args_list[2]
     cmd = docker_run_call.args[0]
     assert "--network=none" in cmd
 
@@ -139,17 +140,18 @@ def test_canary_env_vars_passed_as_e_flags(
     mock_canary_env.return_value = canary_env
     mock_canary_files.return_value = {}
 
+    # 1: docker image inspect, 2: npm pack, 3: docker run
     mock_subprocess_run.side_effect = [
-        MagicMock(),  # docker image inspect
-        MagicMock(stdout="{}\n", stderr="", returncode=0),  # docker run
+        MagicMock(),
+        MagicMock(returncode=0),
+        MagicMock(stdout="{}\n", stderr="", returncode=0),
     ]
 
     run_sandbox(_make_item())
 
-    docker_run_call = mock_subprocess_run.call_args_list[1]
+    docker_run_call = mock_subprocess_run.call_args_list[2]
     cmd = docker_run_call.args[0]
 
-    # Each canary env var should appear as -e KEY=VALUE
     for key, value in canary_env.items():
         flag = f"{key}={value}"
         idx = cmd.index("-e", cmd.index(flag) - 1)
@@ -172,8 +174,10 @@ def test_run_sandbox_handles_string_file_accesses(
         "file_accesses": ["/root/.ssh/id_rsa", {"path": "/root/.env"}],
     })
 
+    # 1: docker image inspect, 2: npm pack, 3: docker run
     mock_subprocess_run.side_effect = [
         MagicMock(),
+        MagicMock(returncode=0),
         MagicMock(stdout=container_output + "\n", stderr="", returncode=0),
     ]
 

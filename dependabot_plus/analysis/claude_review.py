@@ -33,6 +33,7 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
 
 def build_prompt(diff: str, package_name: str, ecosystem: str) -> str:
     return (
+        f"{_SYSTEM_PROMPT}\n\n"
         f"Package: {package_name} (ecosystem: {ecosystem})\n\n"
         f"Diff:\n```\n{diff[:100_000]}\n```"
     )
@@ -47,11 +48,7 @@ def review_diff(
     prompt = build_prompt(diff, package_name, ecosystem)
 
     result = subprocess.run(
-        [
-            "claude", "-p",
-            "--output-format", "json",
-            "--system", _SYSTEM_PROMPT,
-        ],
+        ["claude", "-p", "--output-format", "text"],
         input=prompt,
         capture_output=True,
         text=True,
@@ -66,15 +63,14 @@ def review_diff(
         )
 
     try:
-        # claude --output-format json wraps the response
-        outer = json.loads(result.stdout)
-        # The actual text content may be in a "result" field
-        text = outer.get("result", result.stdout) if isinstance(outer, dict) else result.stdout
-        # Parse the JSON from Claude's response
-        if isinstance(text, str):
-            data = json.loads(text)
-        else:
-            data = text
+        text = result.stdout.strip()
+
+        # Strip markdown fences if Claude wrapped its JSON response
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+
+        data = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return StaticFindings(
             suspicious_patterns=["Could not parse Claude response as JSON"],

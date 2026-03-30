@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import tempfile
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
 from dependabot_plus.sandbox.builder import build_sandbox_image, image_tag
@@ -63,8 +66,38 @@ def _parse_file_accesses(
     return result
 
 
+def _pre_download_npm(package: str, version: str, dest: str) -> None:
+    """Download an npm package tarball to dest (with network access)."""
+    subprocess.run(
+        ["npm", "pack", f"{package}@{version}"],
+        capture_output=True, text=True, cwd=dest, check=True,
+    )
+
+
+def _pre_download_gem(package: str, version: str, dest: str) -> None:
+    """Download a gem file to dest (with network access)."""
+    subprocess.run(
+        ["gem", "fetch", package, "-v", version],
+        capture_output=True, text=True, cwd=dest, check=True,
+    )
+
+
+_PRE_DOWNLOADERS = {
+    Ecosystem.NPM: _pre_download_npm,
+    Ecosystem.GEM: _pre_download_gem,
+    # APT packages are harder to pre-download outside a container;
+    # for now we skip dynamic analysis for apt ecosystem
+}
+
+# Install commands for offline/local installs inside the sandbox
+_OFFLINE_INSTALL_COMMANDS = {
+    Ecosystem.NPM: "npm install /pkg/*.tgz",
+    Ecosystem.GEM: "gem install --local /pkg/*.gem",
+}
+
+
 def run_sandbox(item: QueueItem) -> SandboxResult:
-    """Build and run a sandboxed install of the package. Returns results."""
+    """Pre-download the package, then install it in an isolated sandbox."""
     tag = image_tag(item.ecosystem)
 
     # Ensure image is built
@@ -76,50 +109,58 @@ def run_sandbox(item: QueueItem) -> SandboxResult:
     except subprocess.CalledProcessError:
         build_sandbox_image(item.ecosystem)
 
-    canary_env = generate_canary_env()
-    canary_files = generate_canary_files()
+    # Pre-download the package (with network) into a temp directory
+    pkg_dir = tempfile.mkdtemp(prefix="depbot_pkg_")
+    try:
+        downloader = _PRE_DOWNLOADERS.get(item.ecosystem)
+        if downloader is None:
+            return SandboxResult(
+                install_exit_code=-1,
+                install_logs=f"Dynamic analysis not yet supported for {item.ecosystem.value}",
+                file_accesses=[],
+                network_attempts=[],
+            )
+        downloader(item.package_name, item.new_version, pkg_dir)
 
-    install_cmd = _INSTALL_COMMANDS[item.ecosystem](
-        item.package_name, item.new_version,
-    )
+        canary_env = generate_canary_env()
+        canary_files = generate_canary_files()
 
-    # Build docker run command
-    cmd = [
-        "docker", "run", "--rm",
-        "--network=none",
-        # Set the install command
-        "-e", f"INSTALL_CMD={install_cmd}",
-        # Pass canary files as JSON
-        "-e", f"CANARY_FILES_JSON={json.dumps(canary_files)}",
-        # Pass canary watch paths
-        "-e", f"CANARY_WATCH_PATHS={chr(10).join(CANARY_FILE_PATHS)}",
-    ]
+        install_cmd = _OFFLINE_INSTALL_COMMANDS[item.ecosystem]
 
-    # Add canary environment variables
-    for key, value in canary_env.items():
-        cmd.extend(["-e", f"{key}={value}"])
+        cmd = [
+            "docker", "run", "--rm",
+            "--network=none",
+            "-v", f"{pkg_dir}:/pkg:ro",
+            "-e", f"INSTALL_CMD={install_cmd}",
+            "-e", f"CANARY_FILES_JSON={json.dumps(canary_files)}",
+            "-e", f"CANARY_WATCH_PATHS={chr(10).join(CANARY_FILE_PATHS)}",
+        ]
 
-    cmd.append(tag)
+        for key, value in canary_env.items():
+            cmd.extend(["-e", f"{key}={value}"])
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
+        cmd.append(tag)
 
-    # Parse output even if install failed
-    output = _parse_container_output(result.stdout)
-    access_dicts = _parse_file_accesses(
-        output.get("file_accesses", []), item.ecosystem,
-    )
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
 
-    return SandboxResult(
-        install_exit_code=output.get("install_exit_code", result.returncode),
-        install_logs=output.get("install_log", result.stderr[-5000:]),
-        file_accesses=access_dicts,
-        network_attempts=[],  # --network=none blocks all; future: iptables logging
-    )
+        output = _parse_container_output(result.stdout)
+        access_dicts = _parse_file_accesses(
+            output.get("file_accesses", []), item.ecosystem,
+        )
+
+        return SandboxResult(
+            install_exit_code=output.get("install_exit_code", result.returncode),
+            install_logs=output.get("install_log", result.stderr[-5000:]),
+            file_accesses=access_dicts,
+            network_attempts=[],
+        )
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 def run_sandbox_local(

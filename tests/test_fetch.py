@@ -167,8 +167,8 @@ class TestFetchDependabotPrs:
         assert "gh" in cmd
         assert "--repo" in cmd
         assert "octo/cat" in cmd
-        assert "--app" in cmd
-        assert "dependabot" in cmd
+        assert "--author" in cmd
+        assert "app/dependabot" in cmd
 
 
 # ---------------------------------------------------------------------------

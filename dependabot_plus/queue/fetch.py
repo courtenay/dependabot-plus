@@ -7,13 +7,13 @@ from pathlib import Path
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, load_queue, save_queue
 
-# Dependabot PR title patterns:
+# Dependabot PR title patterns (with optional prefix like "deps(web): "):
 #   "Bump lodash from 4.17.20 to 4.17.21"
-#   "Bump the pip group across 1 directory with 2 updates"
+#   "deps(web): bump import-in-the-middle from 2.0.6 to 3.0.0 in /web"
 #   "Update nokogiri requirement from ~> 1.13 to ~> 1.14"
-#   "Bump lodash from 4.17.20 to 4.17.21 in /subdir"
+#   "chore(deps): bump the npm_and_yarn group across 4 directories with 1 update"
 _BUMP_RE = re.compile(
-    r"^(?:Bump|Update)\s+(.+?)\s+(?:requirement\s+)?from\s+~?>?\s*(\S+)\s+to\s+~?>?\s*(\S+)",
+    r"^(?:.*?:\s*)?(?:Bump|Update)\s+(.+?)\s+(?:requirement\s+)?from\s+~?>?\s*(\S+)\s+to\s+~?>?\s*(\S+)",
     re.IGNORECASE,
 )
 
@@ -27,6 +27,8 @@ _ECOSYSTEM_KEYWORDS: dict[str, Ecosystem] = {
     "docker": Ecosystem.APT,
     "github_actions": Ecosystem.APT,
     "apt": Ecosystem.APT,
+    "gomod": Ecosystem.APT,
+    "go_modules": Ecosystem.APT,
 }
 
 
@@ -57,7 +59,7 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
         [
             "gh", "pr", "list",
             "--repo", repo,
-            "--app", "dependabot",
+            "--author", "app/dependabot",
             "--state", "open",
             "--json", "number,title,body,labels",
             "--limit", "100",
