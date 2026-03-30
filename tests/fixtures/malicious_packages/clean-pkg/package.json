@@ -1,0 +1,6 @@
+{
+  "name": "clean-pkg",
+  "version": "1.0.0",
+  "description": "Test fixture: a clean package that does nothing suspicious",
+  "main": "index.js"
+}

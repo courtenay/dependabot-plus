@@ -1,0 +1,29 @@
+[
+  {
+    "repo": "owner/repo",
+    "pr_number": 42,
+    "ecosystem": "npm",
+    "package_name": "lodash",
+    "old_version": "4.17.20",
+    "new_version": "4.17.21",
+    "status": "queued"
+  },
+  {
+    "repo": "owner/repo",
+    "pr_number": 43,
+    "ecosystem": "gem",
+    "package_name": "nokogiri",
+    "old_version": "1.13.0",
+    "new_version": "1.14.0",
+    "status": "queued"
+  },
+  {
+    "repo": "owner/repo",
+    "pr_number": 44,
+    "ecosystem": "apt",
+    "package_name": "libssl3",
+    "old_version": "3.0.2-0ubuntu1.12",
+    "new_version": "3.0.2-0ubuntu1.13",
+    "status": "queued"
+  }
+]

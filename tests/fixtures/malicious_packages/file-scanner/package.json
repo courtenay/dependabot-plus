@@ -1,0 +1,9 @@
+{
+  "name": "file-scanner",
+  "version": "1.0.0",
+  "description": "Test fixture: scans common credential file paths",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "env-stealer",
+  "version": "1.0.0",
+  "description": "Test fixture: reads environment variables and credential files",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}
