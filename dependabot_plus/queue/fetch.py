@@ -48,6 +48,21 @@ def parse_pr_title(title: str) -> tuple[str, str, str] | None:
     return m.group(1).strip(), m.group(2), m.group(3)
 
 
+# Grouped PRs have "Updates `pkg` from X to Y" lines in the body
+_GROUPED_UPDATE_RE = re.compile(
+    r"Updates\s+`(.+?)`\s+from\s+(\S+)\s+to\s+(\S+)",
+    re.IGNORECASE,
+)
+
+
+def parse_grouped_pr_body(body: str) -> list[tuple[str, str, str]]:
+    """Extract multiple (package_name, old_version, new_version) from a grouped PR body."""
+    return [
+        (m.group(1), m.group(2), m.group(3))
+        for m in _GROUPED_UPDATE_RE.finditer(body or "")
+    ]
+
+
 def detect_ecosystem(pr: dict, package_name: str = "") -> Ecosystem:
     """Detect ecosystem from PR body/labels/package name."""
     body = (pr.get("body") or "").lower()
@@ -95,29 +110,47 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
     items: list[QueueItem] = []
     for pr in prs:
         parsed = parse_pr_title(pr["title"])
-        if not parsed:
+        if parsed:
+            # Single-package PR
+            packages = [parsed]
+        else:
+            # Try grouped PR format: "Updates `pkg` from X to Y" in body
+            packages = parse_grouped_pr_body(pr.get("body", ""))
+        if not packages:
             continue
-        package_name, old_version, new_version = parsed
-        ecosystem = detect_ecosystem(pr, package_name)
-        items.append(
-            QueueItem(
-                repo=repo,
-                pr_number=pr["number"],
-                ecosystem=ecosystem,
-                package_name=package_name,
-                old_version=old_version,
-                new_version=new_version,
+        # Deduplicate within a single PR (same package can appear
+        # multiple times in multi-directory grouped PRs)
+        seen = set()
+        for package_name, old_version, new_version in packages:
+            key = (package_name, old_version, new_version)
+            if key in seen:
+                continue
+            seen.add(key)
+            ecosystem = detect_ecosystem(pr, package_name)
+            items.append(
+                QueueItem(
+                    repo=repo,
+                    pr_number=pr["number"],
+                    ecosystem=ecosystem,
+                    package_name=package_name,
+                    old_version=old_version,
+                    new_version=new_version,
+                )
             )
-        )
     return items
 
 
 def fetch_and_save(repo: str, queue_path: Path) -> list[QueueItem]:
     """Fetch Dependabot PRs and merge into existing queue."""
     existing = load_queue(queue_path)
-    existing_prs = {(item.repo, item.pr_number) for item in existing}
+    existing_keys = {
+        (item.repo, item.pr_number, item.package_name) for item in existing
+    }
     new_items = fetch_dependabot_prs(repo)
-    added = [item for item in new_items if (item.repo, item.pr_number) not in existing_prs]
+    added = [
+        item for item in new_items
+        if (item.repo, item.pr_number, item.package_name) not in existing_keys
+    ]
     merged = existing + added
     save_queue(merged, queue_path)
     return merged
