@@ -106,7 +106,7 @@ class TestFormatReport:
         assert "npm ERR! 404 Not Found" in report
         assert "<details>" in report
 
-    def test_network_egress_attempts(self):
+    def test_network_activity(self):
         item = _make_item()
         verdict = Verdict(
             risk_level=RiskLevel.HIGH,
@@ -116,19 +116,21 @@ class TestFormatReport:
                 install_logs="",
                 file_accesses=[],
                 network_attempts=[
+                    {"type": "http", "method": "POST", "host": "evil.com", "path": "/steal", "body_preview": "secret_data"},
                     {"type": "dns", "query": "A? evil.com"},
-                    {"type": "tcp", "destination": "1.2.3.4:443"},
+                    {"type": "tcp", "destination": "1.2.3.4.443"},
                 ],
             ),
             summary="Outbound connection detected.",
         )
         report = format_report(item, verdict)
 
-        assert "Network Activity Detected" in report
-        assert "DNS lookups" in report
+        assert "HTTP Requests" in report
+        assert "POST" in report
         assert "evil.com" in report
+        assert "secret_data" in report
+        assert "DNS Lookups" in report
         assert "TCP connections" in report
-        assert "1.2.3.4:443" in report
 
     def test_report_ends_with_signature(self):
         item = _make_item()

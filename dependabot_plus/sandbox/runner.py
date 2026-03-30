@@ -200,8 +200,10 @@ def _run_container(
         output.get("file_accesses", []), ecosystem,
     )
 
-    # Parse network capture from container output
+    # Parse network capture — all traffic logged, HTTP requests are high signal
     network_attempts = []
+    for req in output.get("http_requests", []):
+        network_attempts.append({"type": "http", **req})
     for query in output.get("dns_queries", []):
         network_attempts.append({"type": "dns", "query": query})
     for conn in output.get("tcp_connections", []):

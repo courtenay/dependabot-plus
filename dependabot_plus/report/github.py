@@ -46,24 +46,40 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
         lines.append("")
 
     if dynamic.network_attempts:
-        lines.append("### Network Activity Detected")
-        lines.append("")
+        http_reqs = [a for a in dynamic.network_attempts if a.get("type") == "http"]
         dns = [a for a in dynamic.network_attempts if a.get("type") == "dns"]
         tcp = [a for a in dynamic.network_attempts if a.get("type") == "tcp"]
-        http = [a for a in dynamic.network_attempts if a.get("type") == "http"]
+
+        if http_reqs:
+            lines.append("### HTTP Requests")
+            lines.append("")
+            for r in http_reqs:
+                method = r.get("method", "?")
+                host = r.get("host", "?")
+                path = r.get("path", "/")
+                lines.append(f"- **{method}** `{host}{path}`")
+                body = r.get("body_preview")
+                if body:
+                    # Truncate and escape for markdown
+                    safe = body[:200].replace("`", "'")
+                    lines.append(f"  - Body: `{safe}`")
+            lines.append("")
+
         if dns:
-            lines.append("**DNS lookups:**")
+            lines.append("### DNS Lookups")
+            lines.append("")
             for a in dns:
                 lines.append(f"- `{a.get('query', a)}`")
+            lines.append("")
+
         if tcp:
-            lines.append("**TCP connections:**")
+            lines.append(
+                f"<details><summary>TCP connections ({len(tcp)} unique destinations)</summary>\n"
+            )
             for a in tcp:
                 lines.append(f"- `{a.get('destination', a)}`")
-        if http:
-            lines.append("**HTTP requests:**")
-            for a in http:
-                lines.append(f"- `{a.get('host', a)}`")
-        lines.append("")
+            lines.append("\n</details>")
+            lines.append("")
 
     if dynamic.sudo_attempts:
         lines.append("### Privilege Escalation Attempts")

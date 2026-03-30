@@ -11,11 +11,15 @@ log = logging.getLogger("dependabot_plus")
 
 # File extensions that are expected in packages by ecosystem
 _EXPECTED_BINARY_EXTENSIONS = {
-    # Common across ecosystems — docs, build artifacts
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg",
+    # Fonts — common in UI packages
     ".woff", ".woff2", ".ttf", ".eot",
+    # Docs
     ".pdf",
 }
+
+# NOTE: image files (.png, .jpg, etc.) are NOT in the expected list.
+# Recent supply chain attacks (polyfill.io, others) embedded payloads
+# in image files. We entropy-scan all images.
 
 # Extensions that should almost never appear in a library package
 _SUSPICIOUS_EXTENSIONS = {

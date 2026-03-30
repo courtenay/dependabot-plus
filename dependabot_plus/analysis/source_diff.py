@@ -124,17 +124,28 @@ def fetch_source_diff(item: QueueItem) -> str:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+_SOURCE_SUBDIRS = {
+    Ecosystem.NPM: "package",   # npm pack extracts to package/
+    Ecosystem.GEM: "src",       # gem untar extracts data.tar.gz to src/
+    Ecosystem.APT: "src",       # dpkg-source extracts to src/
+}
+
+
 def fetch_source_with_dirs(item: QueueItem) -> tuple[str, str, str, str]:
-    """Fetch source and return (diff, workdir, old_dir, new_dir).
+    """Fetch source and return (diff, workdir, old_src_dir, new_src_dir).
+
+    Returns the extracted source directories (not the parent dirs that
+    contain download artifacts like .tgz files). This ensures binary
+    scanning only sees actual package contents.
 
     Caller is responsible for cleaning up workdir via shutil.rmtree.
-    Used when binary scanning needs access to the extracted directories.
     """
     import sys
     mod = sys.modules[__name__]
     workdir = tempfile.mkdtemp(prefix="depbot_diff_")
     fetcher = getattr(mod, _FETCHER_NAMES[item.ecosystem])
     diff = fetcher(item.package_name, item.old_version, item.new_version, workdir)
-    old_dir = os.path.join(workdir, "old")
-    new_dir = os.path.join(workdir, "new")
+    subdir = _SOURCE_SUBDIRS.get(item.ecosystem, "")
+    old_dir = os.path.join(workdir, "old", subdir)
+    new_dir = os.path.join(workdir, "new", subdir)
     return diff, workdir, old_dir, new_dir

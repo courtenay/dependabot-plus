@@ -222,8 +222,14 @@ def _overall_risk(
         return RiskLevel.HIGH
     if dynamic.sudo_attempts:
         return RiskLevel.HIGH
-    if dynamic.network_attempts:
+    # HTTP requests with POST/PUT (data exfiltration) are HIGH
+    # Any HTTP to non-registry hosts is at least MEDIUM
+    http_reqs = [a for a in dynamic.network_attempts if a.get("type") == "http"]
+    exfil_methods = [r for r in http_reqs if r.get("method") in ("POST", "PUT", "PATCH")]
+    if exfil_methods:
         return RiskLevel.HIGH
+    if http_reqs:
+        return RiskLevel.MEDIUM
     if has_blocked_network:
         return RiskLevel.MEDIUM
     if has_suspicious_binaries:
