@@ -18,18 +18,26 @@ _BUMP_RE = re.compile(
 )
 
 # Ecosystem hints from the PR body or labels
+# Keywords matched against the Dependabot package-manager field in PR body.
+# Ordered most-specific-first; matched via `package-manager=<keyword>` to
+# avoid false positives (e.g. "docker" matching "docs.github.com/docker").
 _ECOSYSTEM_KEYWORDS: dict[str, Ecosystem] = {
+    "go_modules": Ecosystem.GO,
+    "gomod": Ecosystem.GO,
     "npm_and_yarn": Ecosystem.NPM,
     "npm": Ecosystem.NPM,
     "bundler": Ecosystem.GEM,
     "rubygems": Ecosystem.GEM,
-    "pip": Ecosystem.APT,  # close enough for now
+    "pip": Ecosystem.NPM,
     "docker": Ecosystem.APT,
     "github_actions": Ecosystem.APT,
     "apt": Ecosystem.APT,
-    "gomod": Ecosystem.APT,
-    "go_modules": Ecosystem.APT,
 }
+
+
+def _detect_go_from_package_name(name: str) -> bool:
+    """Go modules use domain-style names like github.com/foo/bar."""
+    return "/" in name and "." in name.split("/")[0]
 
 
 def parse_pr_title(title: str) -> tuple[str, str, str] | None:
@@ -40,16 +48,31 @@ def parse_pr_title(title: str) -> tuple[str, str, str] | None:
     return m.group(1).strip(), m.group(2), m.group(3)
 
 
-def detect_ecosystem(pr: dict) -> Ecosystem:
-    """Detect ecosystem from PR body/labels. Defaults to npm."""
+def detect_ecosystem(pr: dict, package_name: str = "") -> Ecosystem:
+    """Detect ecosystem from PR body/labels/package name."""
     body = (pr.get("body") or "").lower()
+
+    # Best signal: Dependabot badge URL contains package-manager=<ecosystem>
+    import re
+    pm_match = re.search(r'package-manager=(\w+)', body)
+    if pm_match:
+        pm = pm_match.group(1)
+        for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
+            if pm == keyword:
+                return eco
+
+    # Fallback: keyword search in body with word boundary context
     for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
-        if keyword in body:
+        # Match keyword surrounded by non-alphanumeric chars or at boundaries
+        if re.search(rf'(?:^|[\s/=&])({re.escape(keyword)})(?:[\s/=&.,;)]|$)', body):
             return eco
     labels = [l.get("name", "").lower() for l in (pr.get("labels") or [])]
     for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
         if any(keyword in label for label in labels):
             return eco
+    # Go modules have domain-style names: github.com/foo/bar
+    if package_name and _detect_go_from_package_name(package_name):
+        return Ecosystem.GO
     return Ecosystem.NPM
 
 
@@ -75,7 +98,7 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
         if not parsed:
             continue
         package_name, old_version, new_version = parsed
-        ecosystem = detect_ecosystem(pr)
+        ecosystem = detect_ecosystem(pr, package_name)
         items.append(
             QueueItem(
                 repo=repo,

@@ -76,7 +76,15 @@ class TestDetectEcosystem:
 
     def test_pip_from_body(self):
         pr = {"body": "Updates pip package requests"}
-        assert detect_ecosystem(pr) == Ecosystem.APT
+        assert detect_ecosystem(pr) == Ecosystem.NPM  # pip has install scripts like npm
+
+    def test_gomod_from_body(self):
+        pr = {"body": "Bumps the gomod group in /backend"}
+        assert detect_ecosystem(pr) == Ecosystem.GO
+
+    def test_go_from_package_name(self):
+        pr = {"body": "some generic body"}
+        assert detect_ecosystem(pr, "github.com/foo/bar") == Ecosystem.GO
 
     def test_label_fallback(self):
         pr = {"body": "", "labels": [{"name": "dependencies"}, {"name": "npm"}]}

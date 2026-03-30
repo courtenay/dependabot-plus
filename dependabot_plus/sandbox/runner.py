@@ -136,19 +136,51 @@ def _pre_download_gem(package: str, version: str, dest: str) -> None:
         raise RuntimeError(f"gem pre-download failed: {result.stdout}\n{result.stderr}")
 
 
+def _pre_download_apt(package: str, version: str, dest: str) -> None:
+    """Download a .deb inside a container (network-enabled, host-isolated)."""
+    tag = image_tag(Ecosystem.APT)
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", tag],
+            capture_output=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        build_sandbox_image(Ecosystem.APT)
+
+    # apt-get download fetches the .deb without installing
+    script = (
+        f"cd /out && apt-get update -qq && "
+        f"apt-get download {package}={version} 2>&1 || "
+        f"apt-get download {package} 2>&1"
+    )
+    result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "-v", f"{dest}:/out",
+            "--entrypoint", "bash",
+            tag,
+            "-c", script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"apt pre-download failed: {result.stdout}\n{result.stderr}")
+
+
 _PRE_DOWNLOADERS = {
     Ecosystem.NPM: _pre_download_npm,
     Ecosystem.GEM: _pre_download_gem,
-    # APT packages are harder to pre-download outside a container;
-    # for now we skip dynamic analysis for apt ecosystem
+    Ecosystem.APT: _pre_download_apt,
+    # Go modules have no install scripts — dynamic analysis is static-only
 }
 
 # Install commands for offline/local installs inside the sandbox.
-# For npm: copy the pre-fetched node_modules + package.json, then rebuild
-# to trigger install scripts (postinstall etc.) — the actual attack surface.
 _OFFLINE_INSTALL_COMMANDS = {
     Ecosystem.NPM: "cp -r /pkg/node_modules . && cp /pkg/package.json . && npm rebuild",
     Ecosystem.GEM: "gem install --local /pkg/*.gem",
+    Ecosystem.APT: "dpkg -i /pkg/*.deb 2>&1 || true",
 }
 
 

@@ -11,7 +11,9 @@ from dependabot_plus.analysis.claude_review import review_diff
 from dependabot_plus.analysis.source_diff import fetch_source_with_dirs
 from dependabot_plus.queue.fetch import fetch_and_save
 from dependabot_plus.queue.models import (
+    Ecosystem,
     RiskLevel,
+    SandboxResult,
     StaticFindings,
     Status,
     Verdict,
@@ -128,8 +130,13 @@ def _analyse(item, mode="monitor"):
         static = StaticFindings(summary="Source diff unavailable.")
 
     # Phase 3: Dynamic analysis (sandbox install)
-    log.info("  Running sandbox install (mode=%s) ...", mode)
-    dynamic = run_sandbox(item, mode=mode)
+    # Go modules have no install scripts — skip dynamic analysis
+    if item.ecosystem == Ecosystem.GO:
+        log.info("  Skipping dynamic analysis for Go module (no install scripts)")
+        dynamic = SandboxResult(install_exit_code=0, install_logs="N/A (Go module)")
+    else:
+        log.info("  Running sandbox install (mode=%s) ...", mode)
+        dynamic = run_sandbox(item, mode=mode)
 
     # Cleanup source dirs
     if workdir:

@@ -10,6 +10,7 @@ class Ecosystem(str, Enum):
     NPM = "npm"
     GEM = "gem"
     APT = "apt"
+    GO = "go"
 
 
 class Status(str, Enum):

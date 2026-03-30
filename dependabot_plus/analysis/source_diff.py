@@ -105,10 +105,47 @@ def _fetch_apt_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> s
     return "(apt source diff unavailable — source packages could not be fetched)"
 
 
+def _fetch_go_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> str:
+    """Go module diffing — uses a Go container to download module source."""
+    old_dir = os.path.join(workdir, "old", "src")
+    new_dir = os.path.join(workdir, "new", "src")
+    os.makedirs(old_dir)
+    os.makedirs(new_dir)
+
+    # Normalise version: add v prefix if missing
+    for d, ver in [(old_dir, old_ver), (new_dir, new_ver)]:
+        v = ver if ver.startswith("v") else f"v{ver}"
+        # Download module, then find and copy the cached source
+        script = (
+            f"export GOPATH=/tmp/gopath GONOSUMCHECK=* GONOSUMDB=* GOTOOLCHAIN=auto && "
+            f"go mod download {package}@{v} 2>/dev/null; "
+            # Find the cached module directory and copy contents to /work
+            f"moddir=$(find /tmp/gopath/pkg/mod -maxdepth 4 -type d -name '*@{v}*' | head -1) && "
+            f"if [ -n \"$moddir\" ]; then cp -r \"$moddir\"/* /work/ 2>/dev/null; fi"
+        )
+        subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "-v", f"{d}:/work",
+                "golang:1.24-bookworm",
+                "bash", "-c", script,
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+
+    # Check if we got anything
+    old_has_files = os.path.isdir(old_dir) and os.listdir(old_dir)
+    new_has_files = os.path.isdir(new_dir) and os.listdir(new_dir)
+    if old_has_files and new_has_files:
+        return _diff_dirs(old_dir, new_dir)
+    return "(go module diff unavailable — source could not be fetched)"
+
+
 _FETCHER_NAMES = {
     Ecosystem.NPM: "_fetch_npm_diff",
     Ecosystem.GEM: "_fetch_gem_diff",
     Ecosystem.APT: "_fetch_apt_diff",
+    Ecosystem.GO: "_fetch_go_diff",
 }
 
 
@@ -128,6 +165,7 @@ _SOURCE_SUBDIRS = {
     Ecosystem.NPM: "package",   # npm pack extracts to package/
     Ecosystem.GEM: "src",       # gem untar extracts data.tar.gz to src/
     Ecosystem.APT: "src",       # dpkg-source extracts to src/
+    Ecosystem.GO: "src",        # go mod download copies to src/
 }
 
 
