@@ -57,7 +57,7 @@ class TestFormatReport:
         # Should NOT contain findings sections
         assert "Static Analysis Findings" not in report
         assert "Canary File Access" not in report
-        assert "Network Egress" not in report
+        assert "Network Activity" not in report
 
     def test_high_risk_with_canary_file_accesses(self):
         item = _make_item()
@@ -115,13 +115,20 @@ class TestFormatReport:
                 install_exit_code=0,
                 install_logs="",
                 file_accesses=[],
-                network_attempts=[{"host": "evil.com", "port": 443}],
+                network_attempts=[
+                    {"type": "dns", "query": "A? evil.com"},
+                    {"type": "tcp", "destination": "1.2.3.4:443"},
+                ],
             ),
             summary="Outbound connection detected.",
         )
         report = format_report(item, verdict)
 
-        assert "Network Egress Attempts" in report
+        assert "Network Activity Detected" in report
+        assert "DNS lookups" in report
+        assert "evil.com" in report
+        assert "TCP connections" in report
+        assert "1.2.3.4:443" in report
 
     def test_report_ends_with_signature(self):
         item = _make_item()

@@ -1,0 +1,9 @@
+{
+  "name": "phone-home",
+  "version": "1.0.0",
+  "description": "Test fixture: attempts DNS lookups and HTTP requests during postinstall",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}

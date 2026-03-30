@@ -110,7 +110,7 @@ def test_run_sandbox_returns_sandbox_result(
         container_output, sandbox_image_exists=False,
     )
 
-    result = run_sandbox(_make_item())
+    result = run_sandbox(_make_item(), mode="strict")
 
     assert isinstance(result, SandboxResult)
     assert result.install_exit_code == 0
@@ -129,7 +129,7 @@ def test_docker_command_includes_network_none(
 
     mock_subprocess_run.side_effect = _mock_subprocess_side_effects("{}")
 
-    run_sandbox(_make_item())
+    run_sandbox(_make_item(), mode="strict")
 
     # The sandbox docker run is the last call
     docker_run_call = mock_subprocess_run.call_args_list[-1]
@@ -152,7 +152,7 @@ def test_canary_env_vars_passed_as_e_flags(
 
     mock_subprocess_run.side_effect = _mock_subprocess_side_effects("{}")
 
-    run_sandbox(_make_item())
+    run_sandbox(_make_item(), mode="strict")
 
     docker_run_call = mock_subprocess_run.call_args_list[-1]
     cmd = docker_run_call.args[0]
@@ -181,33 +181,9 @@ def test_run_sandbox_handles_string_file_accesses(
 
     mock_subprocess_run.side_effect = _mock_subprocess_side_effects(container_output)
 
-    result = run_sandbox(_make_item())
+    result = run_sandbox(_make_item(), mode="strict")
 
     assert result.file_accesses == [
         {"raw": "/root/.ssh/id_rsa"},
         {"path": "/root/.env"},
     ]
-
-
-@patch("dependabot_plus.sandbox.runner.generate_canary_files")
-@patch("dependabot_plus.sandbox.runner.generate_canary_env")
-@patch("dependabot_plus.sandbox.runner.subprocess.run")
-def test_pre_download_runs_in_container(
-    mock_subprocess_run, mock_canary_env, mock_canary_files,
-):
-    """Verify the pre-download step runs inside a Docker container,
-    not on the host."""
-    mock_canary_env.return_value = {}
-    mock_canary_files.return_value = {}
-
-    mock_subprocess_run.side_effect = _mock_subprocess_side_effects("{}")
-
-    run_sandbox(_make_item())
-
-    # The pre-download docker run is the 3rd call (index 2)
-    pre_download_call = mock_subprocess_run.call_args_list[2]
-    cmd = pre_download_call.args[0]
-    assert cmd[0] == "docker"
-    assert "run" in cmd
-    # Should NOT have --network=none (needs to fetch from registry)
-    assert "--network=none" not in cmd

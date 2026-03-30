@@ -152,8 +152,81 @@ _OFFLINE_INSTALL_COMMANDS = {
 }
 
 
-def run_sandbox(item: QueueItem) -> SandboxResult:
-    """Pre-download the package, then install it in an isolated sandbox."""
+def _run_container(
+    tag: str,
+    install_cmd: str,
+    ecosystem: Ecosystem,
+    extra_volumes: list[tuple[str, str]] | None = None,
+    mode: str = "monitor",
+) -> SandboxResult:
+    """Core container execution with canary traps.
+
+    mode="strict": --network=none, no network logging
+    mode="monitor": network enabled, tcpdump runs inside the container
+                    capturing DNS lookups and TCP connections
+    """
+    canary_env = generate_canary_env()
+    canary_files = generate_canary_files()
+
+    cmd = ["docker", "run", "--rm"]
+
+    if mode == "monitor":
+        # Network enabled — tcpdump inside the container captures traffic
+        cmd.extend(["--cap-add", "NET_RAW"])
+        cmd.extend(["-e", "MONITOR_NETWORK=1"])
+    else:
+        cmd.append("--network=none")
+
+    for host_path, container_path in (extra_volumes or []):
+        cmd.extend(["-v", f"{host_path}:{container_path}"])
+
+    cmd.extend([
+        "-e", f"INSTALL_CMD={install_cmd}",
+        "-e", f"CANARY_FILES_JSON={json.dumps(canary_files)}",
+        "-e", f"CANARY_WATCH_PATHS={chr(10).join(CANARY_FILE_PATHS)}",
+    ])
+
+    for key, value in canary_env.items():
+        cmd.extend(["-e", f"{key}={value}"])
+
+    cmd.append(tag)
+
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=600,
+    )
+
+    output = _parse_container_output(result.stdout)
+    access_dicts = _parse_file_accesses(
+        output.get("file_accesses", []), ecosystem,
+    )
+
+    # Parse network capture from container output
+    network_attempts = []
+    for query in output.get("dns_queries", []):
+        network_attempts.append({"type": "dns", "query": query})
+    for conn in output.get("tcp_connections", []):
+        network_attempts.append({"type": "tcp", "destination": conn})
+
+    exit_code = output.get("install_exit_code", result.returncode)
+    log.info(
+        "  Sandbox finished: exit_code=%d, canary_accesses=%d, network_events=%d",
+        exit_code, len(access_dicts), len(network_attempts),
+    )
+
+    return SandboxResult(
+        install_exit_code=exit_code,
+        install_logs=output.get("install_log", result.stderr[-5000:]),
+        file_accesses=access_dicts,
+        network_attempts=network_attempts,
+    )
+
+
+def run_sandbox(item: QueueItem, mode: str = "monitor") -> SandboxResult:
+    """Pre-download the package, then install it in a monitored sandbox.
+
+    mode="monitor": network enabled with tcpdump sidecar (default)
+    mode="strict": --network=none, no network logging
+    """
     tag = image_tag(item.ecosystem)
 
     # Ensure image is built
@@ -181,48 +254,12 @@ def run_sandbox(item: QueueItem) -> SandboxResult:
         downloader(item.package_name, item.new_version, pkg_dir)
         log.info("  Package downloaded, starting sandboxed install ...")
 
-        canary_env = generate_canary_env()
-        canary_files = generate_canary_files()
-
-        install_cmd = _OFFLINE_INSTALL_COMMANDS[item.ecosystem]
-
-        cmd = [
-            "docker", "run", "--rm",
-            "--network=none",
-            "-v", f"{pkg_dir}:/pkg:ro",
-            "-e", f"INSTALL_CMD={install_cmd}",
-            "-e", f"CANARY_FILES_JSON={json.dumps(canary_files)}",
-            "-e", f"CANARY_WATCH_PATHS={chr(10).join(CANARY_FILE_PATHS)}",
-        ]
-
-        for key, value in canary_env.items():
-            cmd.extend(["-e", f"{key}={value}"])
-
-        cmd.append(tag)
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-
-        output = _parse_container_output(result.stdout)
-        access_dicts = _parse_file_accesses(
-            output.get("file_accesses", []), item.ecosystem,
-        )
-
-        exit_code = output.get("install_exit_code", result.returncode)
-        log.info(
-            "  Sandbox finished: exit_code=%d, canary_accesses=%d",
-            exit_code, len(access_dicts),
-        )
-
-        return SandboxResult(
-            install_exit_code=exit_code,
-            install_logs=output.get("install_log", result.stderr[-5000:]),
-            file_accesses=access_dicts,
-            network_attempts=[],
+        return _run_container(
+            tag=tag,
+            install_cmd=_OFFLINE_INSTALL_COMMANDS[item.ecosystem],
+            ecosystem=item.ecosystem,
+            extra_volumes=[(pkg_dir, "/pkg:ro")],
+            mode=mode,
         )
     finally:
         shutil.rmtree(pkg_dir, ignore_errors=True)
@@ -232,15 +269,15 @@ def run_sandbox_local(
     ecosystem: Ecosystem,
     local_package_path: str,
     install_cmd: str | None = None,
+    mode: str = "strict",
 ) -> SandboxResult:
     """Run a sandbox install from a local package directory.
 
-    This is used for integration testing with fixture packages.
-    The local_package_path is volume-mounted into the container at /test-pkg.
+    Used for integration testing with fixture packages.
+    Default mode is strict (no network) for test isolation.
     """
     tag = image_tag(ecosystem)
 
-    # Ensure image is built
     try:
         subprocess.run(
             ["docker", "image", "inspect", tag],
@@ -249,41 +286,13 @@ def run_sandbox_local(
     except subprocess.CalledProcessError:
         build_sandbox_image(ecosystem)
 
-    canary_env = generate_canary_env()
-    canary_files = generate_canary_files()
-
     if install_cmd is None:
         install_cmd = f"npm install {_LOCAL_INSTALL_COMMANDS[ecosystem]}"
 
-    cmd = [
-        "docker", "run", "--rm",
-        "--network=none",
-        "-v", f"{local_package_path}:/test-pkg:ro",
-        "-e", f"INSTALL_CMD={install_cmd}",
-        "-e", f"CANARY_FILES_JSON={json.dumps(canary_files)}",
-        "-e", f"CANARY_WATCH_PATHS={chr(10).join(CANARY_FILE_PATHS)}",
-    ]
-
-    for key, value in canary_env.items():
-        cmd.extend(["-e", f"{key}={value}"])
-
-    cmd.append(tag)
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-
-    output = _parse_container_output(result.stdout)
-    access_dicts = _parse_file_accesses(
-        output.get("file_accesses", []), ecosystem,
-    )
-
-    return SandboxResult(
-        install_exit_code=output.get("install_exit_code", result.returncode),
-        install_logs=output.get("install_log", result.stderr[-5000:]),
-        file_accesses=access_dicts,
-        network_attempts=[],
+    return _run_container(
+        tag=tag,
+        install_cmd=install_cmd,
+        ecosystem=ecosystem,
+        extra_volumes=[(local_package_path, "/test-pkg:ro")],
+        mode=mode,
     )

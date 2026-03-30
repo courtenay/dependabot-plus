@@ -66,7 +66,7 @@ def cmd_process(args: argparse.Namespace) -> None:
         save_queue(all_items, queue_path)
 
         try:
-            verdict = _analyse(item)
+            verdict = _analyse(item, mode=getattr(args, "mode", "monitor"))
             post_report(item, verdict)
             _update_status(all_items, item, Status.DONE)
             log.info(
@@ -85,7 +85,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     cmd_process(args)
 
 
-def _analyse(item):
+def _analyse(item, mode="monitor"):
     """Run static + dynamic + binary analysis and return a Verdict."""
     workdir = None
     diff = ""
@@ -128,15 +128,22 @@ def _analyse(item):
         static = StaticFindings(summary="Source diff unavailable.")
 
     # Phase 3: Dynamic analysis (sandbox install)
-    log.info("  Running sandbox install...")
-    dynamic = run_sandbox(item)
+    log.info("  Running sandbox install (mode=%s) ...", mode)
+    dynamic = run_sandbox(item, mode=mode)
 
     # Cleanup source dirs
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
 
+    # Check install logs for blocked network attempts (EAI_AGAIN, ENOTFOUND, etc.)
+    blocked_network = _scan_install_logs_for_network(dynamic.install_logs)
+    if blocked_network:
+        log.info("  Install logs indicate blocked network access: %s", blocked_network)
+
     # Determine overall risk
-    risk = _overall_risk(static.risk_level, dynamic, bool(binary_findings))
+    risk = _overall_risk(
+        static.risk_level, dynamic, bool(binary_findings), bool(blocked_network),
+    )
 
     summary_parts = []
     if static.summary:
@@ -148,6 +155,15 @@ def _analyse(item):
     if dynamic.file_accesses:
         summary_parts.append(
             f"**Dynamic:** {len(dynamic.file_accesses)} canary file(s) accessed."
+        )
+    if blocked_network:
+        summary_parts.append(
+            f"**Network:** Install attempted network access that was blocked: "
+            + ", ".join(blocked_network)
+        )
+    if dynamic.network_attempts:
+        summary_parts.append(
+            f"**Network:** {len(dynamic.network_attempts)} network event(s) captured."
         )
     if dynamic.install_exit_code != 0 and dynamic.install_exit_code != -1:
         summary_parts.append(
@@ -162,12 +178,45 @@ def _analyse(item):
     )
 
 
-def _overall_risk(static_risk, dynamic, has_suspicious_binaries=False):
+_NETWORK_ERROR_PATTERNS = [
+    ("EAI_AGAIN", "DNS resolution failed (blocked egress)"),
+    ("ENOTFOUND", "DNS resolution failed"),
+    ("ECONNREFUSED", "Connection refused (blocked egress)"),
+    ("ETIMEDOUT", "Connection timed out (blocked egress)"),
+    ("ENETUNREACH", "Network unreachable (blocked egress)"),
+    ("getaddrinfo", "DNS lookup attempted"),
+]
+
+
+def _scan_install_logs_for_network(logs: str) -> list[str]:
+    """Scan install logs for signs of blocked network access."""
+    if not logs:
+        return []
+    findings = []
+    seen = set()
+    for pattern, desc in _NETWORK_ERROR_PATTERNS:
+        if pattern in logs and desc not in seen:
+            # Extract the hostname if possible
+            import re
+            m = re.search(rf'{pattern}.*?(\S+\.(?:com|org|net|io|dev|test)\b)', logs)
+            if m:
+                findings.append(f"{desc}: {m.group(1)}")
+            else:
+                findings.append(desc)
+            seen.add(desc)
+    return findings
+
+
+def _overall_risk(
+    static_risk, dynamic, has_suspicious_binaries=False, has_blocked_network=False,
+):
     """Combine static and dynamic signals into an overall risk level."""
     if dynamic.file_accesses:
         return RiskLevel.HIGH
     if dynamic.network_attempts:
         return RiskLevel.HIGH
+    if has_blocked_network:
+        return RiskLevel.MEDIUM
     if has_suspicious_binaries:
         return RiskLevel.MEDIUM if static_risk != RiskLevel.HIGH else RiskLevel.HIGH
     if static_risk == RiskLevel.HIGH:
@@ -207,11 +256,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--pr", type=int, default=None,
         help="Process a single PR by number",
     )
+    proc.add_argument(
+        "--mode", choices=["monitor", "strict"], default="monitor",
+        help="Sandbox mode: monitor (network+tcpdump) or strict (no network)",
+    )
 
     run = sub.add_parser("run", help="Fetch and process (full pipeline)")
     run.add_argument(
         "--pr", type=int, default=None,
         help="Process a single PR by number",
+    )
+    run.add_argument(
+        "--mode", choices=["monitor", "strict"], default="monitor",
+        help="Sandbox mode: monitor (network+tcpdump) or strict (no network)",
     )
 
     return parser

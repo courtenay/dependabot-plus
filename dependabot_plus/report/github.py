@@ -46,9 +46,23 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
         lines.append("")
 
     if dynamic.network_attempts:
-        lines.append("### Network Egress Attempts")
-        for attempt in dynamic.network_attempts:
-            lines.append(f"- `{attempt}`")
+        lines.append("### Network Activity Detected")
+        lines.append("")
+        dns = [a for a in dynamic.network_attempts if a.get("type") == "dns"]
+        tcp = [a for a in dynamic.network_attempts if a.get("type") == "tcp"]
+        http = [a for a in dynamic.network_attempts if a.get("type") == "http"]
+        if dns:
+            lines.append("**DNS lookups:**")
+            for a in dns:
+                lines.append(f"- `{a.get('query', a)}`")
+        if tcp:
+            lines.append("**TCP connections:**")
+            for a in tcp:
+                lines.append(f"- `{a.get('destination', a)}`")
+        if http:
+            lines.append("**HTTP requests:**")
+            for a in http:
+                lines.append(f"- `{a.get('host', a)}`")
         lines.append("")
 
     # Install result

@@ -133,3 +133,84 @@ class TestCleanPackage:
         )
 
         assert len(result.network_attempts) == 0
+
+
+@skip_no_docker
+class TestPhoneHome:
+    """The phone-home package does DNS lookups and HTTP requests during install."""
+
+    def test_detects_dns_exfiltration(self):
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "phone-home"),
+            mode="monitor",
+        )
+
+        assert result.install_exit_code == 0, (
+            f"Install failed: {result.install_logs}"
+        )
+
+        # Should have captured DNS queries (port 53 traffic)
+        dns_events = [
+            a for a in result.network_attempts if a.get("type") == "dns"
+        ]
+        assert len(dns_events) > 0, (
+            f"Expected DNS activity but got none. "
+            f"All network events: {result.network_attempts}"
+        )
+
+    def test_detects_http_phone_home(self):
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "phone-home"),
+            mode="monitor",
+        )
+
+        # Should have captured TCP connections or HTTP requests
+        tcp_events = [
+            a for a in result.network_attempts
+            if a.get("type") in ("tcp", "http")
+        ]
+        assert len(tcp_events) > 0, (
+            f"Expected TCP/HTTP activity but got none. "
+            f"All network events: {result.network_attempts}"
+        )
+
+    def test_also_detects_file_access(self):
+        """phone-home also reads ~/.ssh/id_rsa — both vectors should fire."""
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "phone-home"),
+            mode="monitor",
+        )
+
+        assert len(result.file_accesses) > 0, (
+            "phone-home reads SSH key but no canary triggered"
+        )
+        assert len(result.network_attempts) > 0, (
+            "phone-home phones home but no network events captured"
+        )
+
+
+@skip_no_docker
+class TestCleanPackageMonitorMode:
+    """Clean package in monitor mode should have no suspicious network activity."""
+
+    def test_clean_in_monitor_mode(self):
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "clean-pkg"),
+            mode="monitor",
+        )
+
+        assert result.install_exit_code == 0
+        assert len(result.file_accesses) == 0
+        # npm install itself might do some DNS for telemetry, but no TCP to
+        # our canary domains
+        canary_network = [
+            a for a in result.network_attempts
+            if "depbot-canary" in str(a)
+        ]
+        assert len(canary_network) == 0, (
+            f"Clean package contacted canary domains: {canary_network}"
+        )
