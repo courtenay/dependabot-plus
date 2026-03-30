@@ -70,19 +70,70 @@ def _parse_file_accesses(
 
 
 def _pre_download_npm(package: str, version: str, dest: str) -> None:
-    """Download an npm package tarball to dest (with network access)."""
-    subprocess.run(
-        ["npm", "pack", f"{package}@{version}"],
-        capture_output=True, text=True, cwd=dest, check=True,
+    """Download an npm package and all its dependencies inside a container.
+
+    Uses a network-enabled but filesystem-isolated Docker container to run
+    `npm install --ignore-scripts`, then copies the result to dest via a
+    bind mount. This avoids running any untrusted code or exposing host
+    credentials during the fetch.
+    """
+    tag = image_tag(Ecosystem.NPM)
+    # Ensure image exists
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", tag],
+            capture_output=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        build_sandbox_image(Ecosystem.NPM)
+
+    # The container writes to /out which is bind-mounted to dest
+    fetch_script = (
+        "cd /out && "
+        f'echo \'{json.dumps({"name": "depbot-sandbox", "dependencies": {package: version}})}\' > package.json && '
+        "npm install --ignore-scripts 2>&1"
     )
+    result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "-v", f"{dest}:/out",
+            "--entrypoint", "bash",
+            tag,
+            "-c", fetch_script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"npm pre-download failed: {result.stdout}\n{result.stderr}")
 
 
 def _pre_download_gem(package: str, version: str, dest: str) -> None:
-    """Download a gem file to dest (with network access)."""
-    subprocess.run(
-        ["gem", "fetch", package, "-v", version],
-        capture_output=True, text=True, cwd=dest, check=True,
+    """Download a gem file inside a container (network-enabled, host-isolated)."""
+    tag = image_tag(Ecosystem.GEM)
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", tag],
+            capture_output=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        build_sandbox_image(Ecosystem.GEM)
+
+    result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "-v", f"{dest}:/out",
+            "--entrypoint", "bash",
+            tag,
+            "-c", f"cd /out && gem fetch {package} -v {version} 2>&1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"gem pre-download failed: {result.stdout}\n{result.stderr}")
 
 
 _PRE_DOWNLOADERS = {
@@ -92,9 +143,11 @@ _PRE_DOWNLOADERS = {
     # for now we skip dynamic analysis for apt ecosystem
 }
 
-# Install commands for offline/local installs inside the sandbox
+# Install commands for offline/local installs inside the sandbox.
+# For npm: copy the pre-fetched node_modules + package.json, then rebuild
+# to trigger install scripts (postinstall etc.) — the actual attack surface.
 _OFFLINE_INSTALL_COMMANDS = {
-    Ecosystem.NPM: "npm install /pkg/*.tgz",
+    Ecosystem.NPM: "cp -r /pkg/node_modules . && cp /pkg/package.json . && npm rebuild",
     Ecosystem.GEM: "gem install --local /pkg/*.gem",
 }
 

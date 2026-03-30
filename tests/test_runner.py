@@ -54,7 +54,7 @@ def test_parse_container_output_json_not_on_last_line():
 
 
 # ---------------------------------------------------------------------------
-# run_sandbox (with pre-download step)
+# run_sandbox (with containerised pre-download)
 # ---------------------------------------------------------------------------
 
 def _make_item(**overrides) -> QueueItem:
@@ -68,6 +68,26 @@ def _make_item(**overrides) -> QueueItem:
     )
     defaults.update(overrides)
     return QueueItem(**defaults)
+
+
+def _mock_subprocess_side_effects(container_output_json, sandbox_image_exists=True):
+    """Build side_effect list for the 4 subprocess.run calls in run_sandbox:
+    1. docker image inspect (sandbox image) — in run_sandbox
+    2. docker image inspect (pre-download image) — in _pre_download_npm
+    3. docker run (pre-download container) — in _pre_download_npm
+    4. docker run (sandbox container) — in run_sandbox
+    """
+    effects = []
+    if sandbox_image_exists:
+        effects.append(MagicMock(returncode=0))  # 1: image exists
+    else:
+        effects.append(subprocess.CalledProcessError(1, "docker"))  # 1: trigger build
+    effects.append(MagicMock(returncode=0))  # 2: pre-download image exists
+    effects.append(MagicMock(returncode=0, stdout="", stderr=""))  # 3: pre-download run
+    effects.append(MagicMock(
+        stdout=container_output_json + "\n", stderr="", returncode=0,
+    ))  # 4: sandbox run
+    return effects
 
 
 @patch("dependabot_plus.sandbox.runner.generate_canary_files")
@@ -86,14 +106,9 @@ def test_run_sandbox_returns_sandbox_result(
         "file_accesses": [],
     })
 
-    # 1: docker image inspect (fail -> trigger build)
-    # 2: npm pack (pre-download)
-    # 3: docker run
-    mock_subprocess_run.side_effect = [
-        subprocess.CalledProcessError(1, "docker"),
-        MagicMock(returncode=0),  # npm pack
-        MagicMock(stdout=container_output + "\n", stderr="", returncode=0),
-    ]
+    mock_subprocess_run.side_effect = _mock_subprocess_side_effects(
+        container_output, sandbox_image_exists=False,
+    )
 
     result = run_sandbox(_make_item())
 
@@ -112,17 +127,12 @@ def test_docker_command_includes_network_none(
     mock_canary_env.return_value = {"TOK": "val"}
     mock_canary_files.return_value = {}
 
-    # 1: docker image inspect, 2: npm pack, 3: docker run
-    mock_subprocess_run.side_effect = [
-        MagicMock(),
-        MagicMock(returncode=0),
-        MagicMock(stdout="{}\n", stderr="", returncode=0),
-    ]
+    mock_subprocess_run.side_effect = _mock_subprocess_side_effects("{}")
 
     run_sandbox(_make_item())
 
-    # The docker run call is the third one
-    docker_run_call = mock_subprocess_run.call_args_list[2]
+    # The sandbox docker run is the last call
+    docker_run_call = mock_subprocess_run.call_args_list[-1]
     cmd = docker_run_call.args[0]
     assert "--network=none" in cmd
 
@@ -140,16 +150,11 @@ def test_canary_env_vars_passed_as_e_flags(
     mock_canary_env.return_value = canary_env
     mock_canary_files.return_value = {}
 
-    # 1: docker image inspect, 2: npm pack, 3: docker run
-    mock_subprocess_run.side_effect = [
-        MagicMock(),
-        MagicMock(returncode=0),
-        MagicMock(stdout="{}\n", stderr="", returncode=0),
-    ]
+    mock_subprocess_run.side_effect = _mock_subprocess_side_effects("{}")
 
     run_sandbox(_make_item())
 
-    docker_run_call = mock_subprocess_run.call_args_list[2]
+    docker_run_call = mock_subprocess_run.call_args_list[-1]
     cmd = docker_run_call.args[0]
 
     for key, value in canary_env.items():
@@ -174,12 +179,7 @@ def test_run_sandbox_handles_string_file_accesses(
         "file_accesses": ["/root/.ssh/id_rsa", {"path": "/root/.env"}],
     })
 
-    # 1: docker image inspect, 2: npm pack, 3: docker run
-    mock_subprocess_run.side_effect = [
-        MagicMock(),
-        MagicMock(returncode=0),
-        MagicMock(stdout=container_output + "\n", stderr="", returncode=0),
-    ]
+    mock_subprocess_run.side_effect = _mock_subprocess_side_effects(container_output)
 
     result = run_sandbox(_make_item())
 
@@ -187,3 +187,27 @@ def test_run_sandbox_handles_string_file_accesses(
         {"raw": "/root/.ssh/id_rsa"},
         {"path": "/root/.env"},
     ]
+
+
+@patch("dependabot_plus.sandbox.runner.generate_canary_files")
+@patch("dependabot_plus.sandbox.runner.generate_canary_env")
+@patch("dependabot_plus.sandbox.runner.subprocess.run")
+def test_pre_download_runs_in_container(
+    mock_subprocess_run, mock_canary_env, mock_canary_files,
+):
+    """Verify the pre-download step runs inside a Docker container,
+    not on the host."""
+    mock_canary_env.return_value = {}
+    mock_canary_files.return_value = {}
+
+    mock_subprocess_run.side_effect = _mock_subprocess_side_effects("{}")
+
+    run_sandbox(_make_item())
+
+    # The pre-download docker run is the 3rd call (index 2)
+    pre_download_call = mock_subprocess_run.call_args_list[2]
+    cmd = pre_download_call.args[0]
+    assert cmd[0] == "docker"
+    assert "run" in cmd
+    # Should NOT have --network=none (needs to fetch from registry)
+    assert "--network=none" not in cmd
