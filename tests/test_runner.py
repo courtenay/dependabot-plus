@@ -4,7 +4,6 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
 from dependabot_plus.sandbox.runner import _parse_container_output, run_sandbox

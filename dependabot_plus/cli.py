@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import logging
 import shutil
-import sys
 from pathlib import Path
 
 from dependabot_plus.analysis.binary_scan import scan_diff_for_new_binaries
@@ -192,7 +191,7 @@ def _analyse(item, mode="monitor"):
         )
     if blocked_network:
         summary_parts.append(
-            f"**Network:** Install attempted network access that was blocked: "
+            "**Network:** Install attempted network access that was blocked: "
             + ", ".join(blocked_network)
         )
     if dynamic.network_attempts:

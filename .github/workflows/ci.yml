@@ -51,7 +51,7 @@ jobs:
         run: pip install ruff
 
       - name: Check formatting
-        run: ruff check --select=E,W,F .
+        run: ruff check .
 
   # Gate that branch protection references — both jobs must pass
   ci-ok:

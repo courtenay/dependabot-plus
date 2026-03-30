@@ -8,7 +8,6 @@ Mark with pytest.mark.integration so they can be skipped in CI or fast runs:
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest

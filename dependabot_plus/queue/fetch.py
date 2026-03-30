@@ -81,7 +81,7 @@ def detect_ecosystem(pr: dict, package_name: str = "") -> Ecosystem:
         # Match keyword surrounded by non-alphanumeric chars or at boundaries
         if re.search(rf'(?:^|[\s/=&])({re.escape(keyword)})(?:[\s/=&.,;)]|$)', body):
             return eco
-    labels = [l.get("name", "").lower() for l in (pr.get("labels") or [])]
+    labels = [lbl.get("name", "").lower() for lbl in (pr.get("labels") or [])]
     for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
         if any(keyword in label for label in labels):
             return eco
