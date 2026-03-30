@@ -20,7 +20,7 @@ from dependabot_plus.queue.models import (
     load_queue,
     save_queue,
 )
-from dependabot_plus.report.github import post_report
+from dependabot_plus.report.github import add_label, post_report
 from dependabot_plus.sandbox.runner import run_sandbox
 
 logging.basicConfig(
@@ -55,6 +55,9 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     all_items = load_queue(queue_path)
 
+    # Track verdicts per PR to decide labeling
+    pr_verdicts: dict[int, list[RiskLevel]] = {}
+
     for item in to_process:
         log.info(
             "Processing PR #%d: %s %s -> %s (%s)",
@@ -71,14 +74,31 @@ def cmd_process(args: argparse.Namespace) -> None:
             verdict = _analyse(item, mode=getattr(args, "mode", "monitor"))
             post_report(item, verdict)
             _update_status(all_items, item, Status.DONE)
+            pr_verdicts.setdefault(item.pr_number, []).append(verdict.risk_level)
             log.info(
                 "PR #%d: risk=%s", item.pr_number, verdict.risk_level.value,
             )
         except Exception:
             log.exception("Failed processing PR #%d", item.pr_number)
             _update_status(all_items, item, Status.FAILED)
+            pr_verdicts.setdefault(item.pr_number, []).append(RiskLevel.UNKNOWN)
 
         save_queue(all_items, queue_path)
+
+    # Label PRs where ALL packages passed with LOW risk
+    for pr_number, risks in pr_verdicts.items():
+        # Check all items for this PR are done (including ones from prior runs)
+        pr_items = [i for i in all_items if i.pr_number == pr_number]
+        all_done = all(i.status in (Status.DONE, Status.FAILED) for i in pr_items)
+        all_low = all(r == RiskLevel.LOW for r in risks)
+
+        if all_done and all_low:
+            repo = pr_items[0].repo
+            log.info("PR #%d: all packages LOW — adding deps-vetted label", pr_number)
+            try:
+                add_label(repo, pr_number, "deps-vetted")
+            except Exception:
+                log.exception("Failed to label PR #%d", pr_number)
 
 
 def cmd_run(args: argparse.Namespace) -> None:

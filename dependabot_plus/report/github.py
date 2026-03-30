@@ -125,3 +125,19 @@ def post_report(item: QueueItem, verdict: Verdict) -> None:
         text=True,
         check=True,
     )
+
+
+def add_label(repo: str, pr_number: int, label: str) -> None:
+    """Add a label to a PR, creating it first if it doesn't exist."""
+    # Ensure label exists (no-op if it already does)
+    subprocess.run(
+        ["gh", "label", "create", label, "--repo", repo,
+         "--color", "0E8A16", "--description", "Dependencies vetted by DependabotPlus",
+         "--force"],
+        capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["gh", "pr", "edit", str(pr_number), "--repo", repo,
+         "--add-label", label],
+        capture_output=True, text=True, check=True,
+    )
