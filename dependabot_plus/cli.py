@@ -140,6 +140,9 @@ def _analyse(item, mode="monitor"):
     if blocked_network:
         log.info("  Install logs indicate blocked network access: %s", blocked_network)
 
+    if dynamic.sudo_attempts:
+        log.info("  SUDO attempts detected: %d", len(dynamic.sudo_attempts))
+
     # Determine overall risk
     risk = _overall_risk(
         static.risk_level, dynamic, bool(binary_findings), bool(blocked_network),
@@ -148,6 +151,10 @@ def _analyse(item, mode="monitor"):
     summary_parts = []
     if static.summary:
         summary_parts.append(f"**Static:** {static.summary}")
+    if dynamic.sudo_attempts:
+        summary_parts.append(
+            f"**Privilege escalation:** {len(dynamic.sudo_attempts)} sudo attempt(s)."
+        )
     if binary_findings:
         summary_parts.append(
             f"**Binary scan:** {len(binary_findings)} suspicious binary file(s) found."
@@ -212,6 +219,8 @@ def _overall_risk(
 ):
     """Combine static and dynamic signals into an overall risk level."""
     if dynamic.file_accesses:
+        return RiskLevel.HIGH
+    if dynamic.sudo_attempts:
         return RiskLevel.HIGH
     if dynamic.network_attempts:
         return RiskLevel.HIGH

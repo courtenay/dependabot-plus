@@ -61,6 +61,7 @@ class SandboxResult:
     install_logs: str
     file_accesses: list[dict] = field(default_factory=list)
     network_attempts: list[dict] = field(default_factory=list)
+    sudo_attempts: list[str] = field(default_factory=list)
 
 
 @dataclass

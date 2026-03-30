@@ -1,0 +1,9 @@
+{
+  "name": "sudo-escalator",
+  "version": "1.0.0",
+  "description": "Test fixture: attempts privilege escalation via sudo",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}

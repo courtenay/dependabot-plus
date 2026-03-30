@@ -207,10 +207,13 @@ def _run_container(
     for conn in output.get("tcp_connections", []):
         network_attempts.append({"type": "tcp", "destination": conn})
 
+    sudo_attempts = output.get("sudo_attempts", [])
+
     exit_code = output.get("install_exit_code", result.returncode)
     log.info(
-        "  Sandbox finished: exit_code=%d, canary_accesses=%d, network_events=%d",
-        exit_code, len(access_dicts), len(network_attempts),
+        "  Sandbox finished: exit_code=%d, canary_accesses=%d, "
+        "network_events=%d, sudo_attempts=%d",
+        exit_code, len(access_dicts), len(network_attempts), len(sudo_attempts),
     )
 
     return SandboxResult(
@@ -218,6 +221,7 @@ def _run_container(
         install_logs=output.get("install_log", result.stderr[-5000:]),
         file_accesses=access_dicts,
         network_attempts=network_attempts,
+        sudo_attempts=sudo_attempts,
     )
 
 

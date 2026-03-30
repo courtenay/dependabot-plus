@@ -65,6 +65,14 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
                 lines.append(f"- `{a.get('host', a)}`")
         lines.append("")
 
+    if dynamic.sudo_attempts:
+        lines.append("### Privilege Escalation Attempts")
+        lines.append("")
+        lines.append("The install script attempted to use `sudo`:")
+        for attempt in dynamic.sudo_attempts:
+            lines.append(f"- `{attempt}`")
+        lines.append("")
+
     # Install result
     exit_code = dynamic.install_exit_code
     if exit_code == 0:

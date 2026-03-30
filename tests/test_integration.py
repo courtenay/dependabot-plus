@@ -214,3 +214,42 @@ class TestCleanPackageMonitorMode:
         assert len(canary_network) == 0, (
             f"Clean package contacted canary domains: {canary_network}"
         )
+
+
+@skip_no_docker
+class TestSudoEscalator:
+    """The sudo-escalator package attempts privilege escalation."""
+
+    def test_detects_sudo_attempts(self):
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "sudo-escalator"),
+        )
+
+        # Install may fail (sudo fails) but we should still detect the attempts
+        assert len(result.sudo_attempts) > 0, (
+            f"Expected sudo attempts but got none. "
+            f"Install logs: {result.install_logs}"
+        )
+
+    def test_sudo_attempts_contain_commands(self):
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "sudo-escalator"),
+        )
+
+        all_sudo = " ".join(result.sudo_attempts)
+        # Should see the specific commands attempted
+        assert "shadow" in all_sudo or "crontab" in all_sudo or "passwd" in all_sudo, (
+            f"Expected specific sudo targets in: {result.sudo_attempts}"
+        )
+
+    def test_clean_package_no_sudo(self):
+        result = run_sandbox_local(
+            ecosystem=Ecosystem.NPM,
+            local_package_path=str(FIXTURES / "clean-pkg"),
+        )
+
+        assert len(result.sudo_attempts) == 0, (
+            f"Clean package triggered sudo alerts: {result.sudo_attempts}"
+        )
