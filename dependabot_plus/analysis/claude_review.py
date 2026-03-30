@@ -19,6 +19,9 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     - Post-install scripts that execute arbitrary commands
     - Crypto mining indicators (stratum protocols, CPU-intensive loops)
     - Data exfiltration via DNS, HTTP, or other channels
+    - New binary files (images, mp3s, fonts, wasm) that could contain
+      steganographic payloads or encoded executables
+    - Code that reads/decodes binary assets at runtime in unusual ways
 
     Respond with JSON only, no markdown fences:
     {

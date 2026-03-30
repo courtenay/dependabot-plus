@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -8,6 +9,8 @@ import tempfile
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
 from dependabot_plus.sandbox.builder import build_sandbox_image, image_tag
+
+log = logging.getLogger("dependabot_plus")
 from dependabot_plus.sandbox.canary import (
     CANARY_FILE_PATHS,
     generate_canary_env,
@@ -114,13 +117,16 @@ def run_sandbox(item: QueueItem) -> SandboxResult:
     try:
         downloader = _PRE_DOWNLOADERS.get(item.ecosystem)
         if downloader is None:
+            log.info("  Skipping dynamic analysis: %s not supported yet", item.ecosystem.value)
             return SandboxResult(
                 install_exit_code=-1,
                 install_logs=f"Dynamic analysis not yet supported for {item.ecosystem.value}",
                 file_accesses=[],
                 network_attempts=[],
             )
+        log.info("  Downloading %s@%s ...", item.package_name, item.new_version)
         downloader(item.package_name, item.new_version, pkg_dir)
+        log.info("  Package downloaded, starting sandboxed install ...")
 
         canary_env = generate_canary_env()
         canary_files = generate_canary_files()
@@ -153,8 +159,14 @@ def run_sandbox(item: QueueItem) -> SandboxResult:
             output.get("file_accesses", []), item.ecosystem,
         )
 
+        exit_code = output.get("install_exit_code", result.returncode)
+        log.info(
+            "  Sandbox finished: exit_code=%d, canary_accesses=%d",
+            exit_code, len(access_dicts),
+        )
+
         return SandboxResult(
-            install_exit_code=output.get("install_exit_code", result.returncode),
+            install_exit_code=exit_code,
             install_logs=output.get("install_log", result.stderr[-5000:]),
             file_accesses=access_dicts,
             network_attempts=[],

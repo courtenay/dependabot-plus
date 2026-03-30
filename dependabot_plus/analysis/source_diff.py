@@ -122,3 +122,19 @@ def fetch_source_diff(item: QueueItem) -> str:
         return fetcher(item.package_name, item.old_version, item.new_version, workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def fetch_source_with_dirs(item: QueueItem) -> tuple[str, str, str, str]:
+    """Fetch source and return (diff, workdir, old_dir, new_dir).
+
+    Caller is responsible for cleaning up workdir via shutil.rmtree.
+    Used when binary scanning needs access to the extracted directories.
+    """
+    import sys
+    mod = sys.modules[__name__]
+    workdir = tempfile.mkdtemp(prefix="depbot_diff_")
+    fetcher = getattr(mod, _FETCHER_NAMES[item.ecosystem])
+    diff = fetcher(item.package_name, item.old_version, item.new_version, workdir)
+    old_dir = os.path.join(workdir, "old")
+    new_dir = os.path.join(workdir, "new")
+    return diff, workdir, old_dir, new_dir

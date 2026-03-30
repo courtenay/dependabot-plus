@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
 
+from dependabot_plus.analysis.binary_scan import scan_diff_for_new_binaries
 from dependabot_plus.analysis.claude_review import review_diff
-from dependabot_plus.analysis.source_diff import fetch_source_diff
+from dependabot_plus.analysis.source_diff import fetch_source_with_dirs
 from dependabot_plus.queue.fetch import fetch_and_save
 from dependabot_plus.queue.models import (
     RiskLevel,
+    StaticFindings,
     Status,
     Verdict,
     load_queue,
@@ -83,37 +86,70 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def _analyse(item):
-    """Run static + dynamic analysis and return a Verdict."""
-    # Static analysis: diff + Claude review
+    """Run static + dynamic + binary analysis and return a Verdict."""
+    workdir = None
+    diff = ""
+    binary_findings = []
+
+    # Phase 1: Fetch source diff + binary scan
     log.info("  Fetching source diff...")
     try:
-        diff = fetch_source_diff(item)
+        diff, workdir, old_dir, new_dir = fetch_source_with_dirs(item)
+        log.info("  Scanning for suspicious binaries...")
+        bin_result = scan_diff_for_new_binaries(old_dir, new_dir)
+        if bin_result.binary_count:
+            log.info(
+                "  Found %d binary file(s), %d suspicious",
+                bin_result.binary_count, bin_result.suspicious_count,
+            )
+        binary_findings = [
+            f"{f.path}: {f.reason} ({f.size} bytes)"
+            for f in bin_result.findings
+        ]
     except Exception:
         log.exception("  Source diff failed, continuing with dynamic only")
-        diff = ""
 
+    # Phase 2: Claude static review
     log.info("  Running Claude static review...")
-    if diff:
-        static = review_diff(diff, item.package_name, item.ecosystem.value)
+    if diff or binary_findings:
+        # Include binary findings in the prompt so Claude can factor them in
+        extra = ""
+        if binary_findings:
+            extra = (
+                "\n\nBinary file analysis also found these suspicious files:\n"
+                + "\n".join(f"- {f}" for f in binary_findings)
+            )
+        static = review_diff(
+            diff + extra, item.package_name, item.ecosystem.value,
+        )
+        # Merge binary findings into static findings
+        static.suspicious_patterns.extend(binary_findings)
     else:
-        from dependabot_plus.queue.models import StaticFindings
         static = StaticFindings(summary="Source diff unavailable.")
 
-    # Dynamic analysis: sandbox install
+    # Phase 3: Dynamic analysis (sandbox install)
     log.info("  Running sandbox install...")
     dynamic = run_sandbox(item)
 
+    # Cleanup source dirs
+    if workdir:
+        shutil.rmtree(workdir, ignore_errors=True)
+
     # Determine overall risk
-    risk = _overall_risk(static.risk_level, dynamic)
+    risk = _overall_risk(static.risk_level, dynamic, bool(binary_findings))
 
     summary_parts = []
     if static.summary:
         summary_parts.append(f"**Static:** {static.summary}")
+    if binary_findings:
+        summary_parts.append(
+            f"**Binary scan:** {len(binary_findings)} suspicious binary file(s) found."
+        )
     if dynamic.file_accesses:
         summary_parts.append(
             f"**Dynamic:** {len(dynamic.file_accesses)} canary file(s) accessed."
         )
-    if dynamic.install_exit_code != 0:
+    if dynamic.install_exit_code != 0 and dynamic.install_exit_code != -1:
         summary_parts.append(
             f"**Install failed** with exit code {dynamic.install_exit_code}."
         )
@@ -126,12 +162,14 @@ def _analyse(item):
     )
 
 
-def _overall_risk(static_risk, dynamic):
+def _overall_risk(static_risk, dynamic, has_suspicious_binaries=False):
     """Combine static and dynamic signals into an overall risk level."""
     if dynamic.file_accesses:
         return RiskLevel.HIGH
     if dynamic.network_attempts:
         return RiskLevel.HIGH
+    if has_suspicious_binaries:
+        return RiskLevel.MEDIUM if static_risk != RiskLevel.HIGH else RiskLevel.HIGH
     if static_risk == RiskLevel.HIGH:
         return RiskLevel.HIGH
     if static_risk == RiskLevel.MEDIUM:
