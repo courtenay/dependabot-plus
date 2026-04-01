@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem
 

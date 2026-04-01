@@ -5,7 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from dependabot_plus.queue.models import Ecosystem, QueueItem, load_queue, save_queue
+from dependabot_plus.queue.models import Ecosystem, QueueItem, Status, load_queue, save_queue
 
 # Dependabot PR title patterns (with optional prefix like "deps(web): "):
 #   "Bump lodash from 4.17.20 to 4.17.21"
@@ -81,7 +81,7 @@ def detect_ecosystem(pr: dict, package_name: str = "") -> Ecosystem:
         # Match keyword surrounded by non-alphanumeric chars or at boundaries
         if re.search(rf'(?:^|[\s/=&])({re.escape(keyword)})(?:[\s/=&.,;)]|$)', body):
             return eco
-    labels = [l.get("name", "").lower() for l in (pr.get("labels") or [])]
+    labels = [lbl.get("name", "").lower() for lbl in (pr.get("labels") or [])]
     for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
         if any(keyword in label for label in labels):
             return eco
@@ -109,6 +109,10 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
     prs = json.loads(result.stdout)
     items: list[QueueItem] = []
     for pr in prs:
+        # Skip PRs already labeled as vetted
+        labels = {lbl.get("name", "") for lbl in (pr.get("labels") or [])}
+        if "deps-vetted" in labels:
+            continue
         parsed = parse_pr_title(pr["title"])
         if parsed:
             # Single-package PR
@@ -143,14 +147,23 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
 def fetch_and_save(repo: str, queue_path: Path) -> list[QueueItem]:
     """Fetch Dependabot PRs and merge into existing queue."""
     existing = load_queue(queue_path)
-    existing_keys = {
-        (item.repo, item.pr_number, item.package_name) for item in existing
-    }
     new_items = fetch_dependabot_prs(repo)
+    fresh_keys = {
+        (item.repo, item.pr_number, item.package_name) for item in new_items
+    }
+    # Drop stale queued items whose PRs are no longer open/eligible
+    kept = [
+        item for item in existing
+        if (item.repo, item.pr_number, item.package_name) in fresh_keys
+        or item.status != Status.QUEUED
+    ]
+    kept_keys = {
+        (item.repo, item.pr_number, item.package_name) for item in kept
+    }
     added = [
         item for item in new_items
-        if (item.repo, item.pr_number, item.package_name) not in existing_keys
+        if (item.repo, item.pr_number, item.package_name) not in kept_keys
     ]
-    merged = existing + added
+    merged = kept + added
     save_queue(merged, queue_path)
     return merged

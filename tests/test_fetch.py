@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from dependabot_plus.queue.fetch import (
     detect_ecosystem,
@@ -167,6 +166,28 @@ class TestFetchDependabotPrs:
         assert items == []
 
     @patch("dependabot_plus.queue.fetch.subprocess.run")
+    def test_skips_deps_vetted_label(self, mock_run):
+        mock_run.return_value.stdout = _gh_output(
+            [
+                {
+                    "number": 1,
+                    "title": "Bump lodash from 1.0 to 2.0",
+                    "body": "",
+                    "labels": [{"name": "deps-vetted"}],
+                },
+                {
+                    "number": 2,
+                    "title": "Bump axios from 0.21.1 to 0.21.2",
+                    "body": "",
+                    "labels": [{"name": "dependencies"}],
+                },
+            ]
+        )
+        items = fetch_dependabot_prs("owner/repo")
+        assert len(items) == 1
+        assert items[0].pr_number == 2
+
+    @patch("dependabot_plus.queue.fetch.subprocess.run")
     def test_gh_cli_called_with_correct_args(self, mock_run):
         mock_run.return_value.stdout = "[]"
         fetch_dependabot_prs("octo/cat")
@@ -257,6 +278,56 @@ class TestFetchAndSave:
         assert queue_path.exists()
         data = json.loads(queue_path.read_text())
         assert len(data) == 1
+
+    @patch("dependabot_plus.queue.fetch.fetch_dependabot_prs")
+    def test_prunes_stale_queued_items(self, mock_fetch, tmp_path: Path):
+        """Items still QUEUED but no longer returned by fetch (merged/closed/vetted) are dropped."""
+        queue_path = tmp_path / "queue.json"
+        stale = QueueItem(
+            repo="o/r",
+            pr_number=950,
+            ecosystem=Ecosystem.NPM,
+            package_name="stale-pkg",
+            old_version="1.0",
+            new_version="2.0",
+            status=Status.QUEUED,
+        )
+        save_queue([stale], queue_path)
+
+        mock_fetch.return_value = [
+            QueueItem(
+                repo="o/r",
+                pr_number=7,
+                ecosystem=Ecosystem.NPM,
+                package_name="fresh-pkg",
+                old_version="1.0",
+                new_version="2.0",
+            )
+        ]
+        merged = fetch_and_save("o/r", queue_path)
+        assert len(merged) == 1
+        assert merged[0].pr_number == 7
+
+    @patch("dependabot_plus.queue.fetch.fetch_dependabot_prs")
+    def test_keeps_processing_items_even_if_stale(self, mock_fetch, tmp_path: Path):
+        """Items mid-processing are kept even if the PR is no longer fetched."""
+        queue_path = tmp_path / "queue.json"
+        in_progress = QueueItem(
+            repo="o/r",
+            pr_number=950,
+            ecosystem=Ecosystem.NPM,
+            package_name="busy-pkg",
+            old_version="1.0",
+            new_version="2.0",
+            status=Status.PROCESSING,
+        )
+        save_queue([in_progress], queue_path)
+
+        mock_fetch.return_value = []
+        merged = fetch_and_save("o/r", queue_path)
+        assert len(merged) == 1
+        assert merged[0].pr_number == 950
+        assert merged[0].status == Status.PROCESSING
 
     @patch("dependabot_plus.queue.fetch.fetch_dependabot_prs")
     def test_works_with_no_existing_file(self, mock_fetch, tmp_path: Path):

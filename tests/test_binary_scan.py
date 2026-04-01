@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 
 from dependabot_plus.analysis.binary_scan import (
     _shannon_entropy,

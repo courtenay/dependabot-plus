@@ -116,7 +116,10 @@ class TestFormatReport:
                 install_logs="",
                 file_accesses=[],
                 network_attempts=[
-                    {"type": "http", "method": "POST", "host": "evil.com", "path": "/steal", "body_preview": "secret_data"},
+                    {
+                        "type": "http", "method": "POST", "host": "evil.com",
+                        "path": "/steal", "body_preview": "secret_data",
+                    },
                     {"type": "dns", "query": "A? evil.com"},
                     {"type": "tcp", "destination": "1.2.3.4.443"},
                 ],
