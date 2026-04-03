@@ -15,7 +15,7 @@ jobs:
       security-events: write  # upload SARIF
       id-token: write         # OIDC token for Scorecard
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
