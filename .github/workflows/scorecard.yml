@@ -15,7 +15,7 @@ jobs:
       security-events: write  # upload SARIF
       id-token: write         # OIDC token for Scorecard
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -27,6 +27,6 @@ jobs:
           publish_results: true
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif
