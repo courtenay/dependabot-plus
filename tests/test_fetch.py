@@ -75,7 +75,7 @@ class TestDetectEcosystem:
 
     def test_pip_from_body(self):
         pr = {"body": "Updates pip package requests"}
-        assert detect_ecosystem(pr) == Ecosystem.NPM  # pip has install scripts like npm
+        assert detect_ecosystem(pr) == Ecosystem.PIP
 
     def test_gomod_from_body(self):
         pr = {"body": "Bumps the gomod group in /backend"}
@@ -103,6 +103,18 @@ class TestDetectEcosystem:
             "labels": [{"name": "npm"}],
         }
         assert detect_ecosystem(pr) == Ecosystem.GEM
+
+    def test_go_package_name_takes_priority_over_body(self):
+        pr = {"body": "Updates docker dependencies in grouped PR"}
+        assert detect_ecosystem(pr, "github.com/aws/aws-sdk-go-v2/config") == Ecosystem.GO
+
+    def test_docker_from_body(self):
+        pr = {"body": "package-manager=docker update"}
+        assert detect_ecosystem(pr) == Ecosystem.DOCKER
+
+    def test_github_actions_from_body(self):
+        pr = {"body": "package-manager=github_actions update"}
+        assert detect_ecosystem(pr) == Ecosystem.GITHUB_ACTIONS
 
 
 # ---------------------------------------------------------------------------

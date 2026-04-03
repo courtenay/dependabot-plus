@@ -10,6 +10,8 @@ from dependabot_plus.analysis.claude_review import review_diff
 from dependabot_plus.analysis.source_diff import fetch_source_with_dirs
 from dependabot_plus.queue.fetch import fetch_and_save
 from dependabot_plus.queue.models import (
+    SKIP_DYNAMIC_ECOSYSTEMS,
+    SUPPORTED_ECOSYSTEMS,
     Ecosystem,
     RiskLevel,
     SandboxResult,
@@ -64,6 +66,16 @@ def cmd_process(args: argparse.Namespace) -> None:
             item.old_version, item.new_version,
             item.ecosystem.value,
         )
+
+        if item.ecosystem not in SUPPORTED_ECOSYSTEMS:
+            log.info(
+                "  Skipping unsupported ecosystem %s for %s",
+                item.ecosystem.value, item.package_name,
+            )
+            _update_status(all_items, item, Status.DONE)
+            save_queue(all_items, queue_path)
+            pr_verdicts.setdefault(item.pr_number, []).append(RiskLevel.LOW)
+            continue
 
         # Update status
         _update_status(all_items, item, Status.PROCESSING)
@@ -149,10 +161,10 @@ def _analyse(item, mode="monitor"):
         static = StaticFindings(summary="Source diff unavailable.")
 
     # Phase 3: Dynamic analysis (sandbox install)
-    # Go modules have no install scripts — skip dynamic analysis
-    if item.ecosystem == Ecosystem.GO:
-        log.info("  Skipping dynamic analysis for Go module (no install scripts)")
-        dynamic = SandboxResult(install_exit_code=0, install_logs="N/A (Go module)")
+    # Some ecosystems have no install scripts — skip dynamic analysis
+    if item.ecosystem in SKIP_DYNAMIC_ECOSYSTEMS:
+        log.info("  Skipping dynamic analysis for %s (no install scripts)", item.ecosystem.value)
+        dynamic = SandboxResult(install_exit_code=0, install_logs=f"N/A ({item.ecosystem.value})")
     else:
         log.info("  Running sandbox install (mode=%s) ...", mode)
         dynamic = run_sandbox(item, mode=mode)
@@ -269,7 +281,9 @@ def _overall_risk(
 
 def _update_status(all_items, item, new_status):
     for i in all_items:
-        if i.repo == item.repo and i.pr_number == item.pr_number:
+        if (i.repo == item.repo
+                and i.pr_number == item.pr_number
+                and i.package_name == item.package_name):
             i.status = new_status
             break
 

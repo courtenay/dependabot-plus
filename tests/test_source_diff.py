@@ -166,6 +166,39 @@ class TestFetchSourceDiff:
         assert result == "apt diff"
         mock_fetcher.assert_called_once()
 
+    def test_dispatches_to_pip_fetcher(self):
+        item = self._make_item(Ecosystem.PIP)
+        with patch(
+            "dependabot_plus.analysis.source_diff._fetch_pip_diff",
+            return_value="pip diff",
+        ) as mock_fetcher:
+            result = fetch_source_diff(item)
+
+        assert result == "pip diff"
+        mock_fetcher.assert_called_once()
+
+    def test_dispatches_to_docker_fetcher(self):
+        item = self._make_item(Ecosystem.DOCKER)
+        with patch(
+            "dependabot_plus.analysis.source_diff._fetch_docker_diff",
+            return_value="docker diff",
+        ) as mock_fetcher:
+            result = fetch_source_diff(item)
+
+        assert result == "docker diff"
+        mock_fetcher.assert_called_once()
+
+    def test_dispatches_to_github_actions_fetcher(self):
+        item = self._make_item(Ecosystem.GITHUB_ACTIONS)
+        with patch(
+            "dependabot_plus.analysis.source_diff._fetch_github_actions_diff",
+            return_value="actions diff",
+        ) as mock_fetcher:
+            result = fetch_source_diff(item)
+
+        assert result == "actions diff"
+        mock_fetcher.assert_called_once()
+
     def test_temp_directory_cleaned_up_on_success(self):
         item = self._make_item(Ecosystem.NPM)
         captured_workdir = {}

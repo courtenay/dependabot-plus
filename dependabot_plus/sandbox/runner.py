@@ -20,12 +20,14 @@ _INSTALL_COMMANDS = {
     Ecosystem.NPM: lambda pkg, ver: f"npm install {pkg}@{ver}",
     Ecosystem.GEM: lambda pkg, ver: f"gem install {pkg} -v {ver}",
     Ecosystem.APT: lambda pkg, ver: f"apt-get update -qq && apt-get install -y {pkg}={ver}",
+    Ecosystem.PIP: lambda pkg, ver: f"pip install {pkg}=={ver}",
 }
 
 _LOCAL_INSTALL_COMMANDS = {
     Ecosystem.NPM: "/test-pkg",
     Ecosystem.GEM: "gem install /test-pkg/*.gem",
     Ecosystem.APT: "dpkg -i /test-pkg/*.deb",
+    Ecosystem.PIP: "pip install /test-pkg/*",
 }
 
 # Known-benign file accesses by ecosystem tools (not malware)
@@ -33,6 +35,7 @@ _BENIGN_ACCESS_PATTERNS = {
     Ecosystem.NPM: {".npmrc"},
     Ecosystem.GEM: {".gem/credentials"},
     Ecosystem.APT: set(),
+    Ecosystem.PIP: {".pip", ".cache/pip"},
 }
 
 
@@ -168,11 +171,39 @@ def _pre_download_apt(package: str, version: str, dest: str) -> None:
         raise RuntimeError(f"apt pre-download failed: {result.stdout}\n{result.stderr}")
 
 
+def _pre_download_pip(package: str, version: str, dest: str) -> None:
+    """Download a pip package inside a container (network-enabled, host-isolated)."""
+    tag = image_tag(Ecosystem.PIP)
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", tag],
+            capture_output=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        build_sandbox_image(Ecosystem.PIP)
+
+    result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "-v", f"{dest}:/out",
+            "--entrypoint", "bash",
+            tag,
+            "-c", f"cd /out && pip download --no-deps '{package}=={version}' 2>&1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"pip pre-download failed: {result.stdout}\n{result.stderr}")
+
+
 _PRE_DOWNLOADERS = {
     Ecosystem.NPM: _pre_download_npm,
     Ecosystem.GEM: _pre_download_gem,
     Ecosystem.APT: _pre_download_apt,
-    # Go modules have no install scripts — dynamic analysis is static-only
+    Ecosystem.PIP: _pre_download_pip,
+    # Go/Docker/GitHub Actions have no install scripts — dynamic analysis skipped
 }
 
 # Install commands for offline/local installs inside the sandbox.
@@ -180,6 +211,7 @@ _OFFLINE_INSTALL_COMMANDS = {
     Ecosystem.NPM: "cp -r /pkg/node_modules . && cp /pkg/package.json . && npm rebuild",
     Ecosystem.GEM: "gem install --local /pkg/*.gem",
     Ecosystem.APT: "dpkg -i /pkg/*.deb 2>&1 || true",
+    Ecosystem.PIP: "pip install --no-index --find-links /pkg/ /pkg/* 2>&1",
 }
 
 
