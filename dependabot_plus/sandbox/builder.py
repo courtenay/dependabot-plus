@@ -14,6 +14,7 @@ _DOCKERFILE_MAP = {
     Ecosystem.NPM: "npm.Dockerfile",
     Ecosystem.GEM: "gem.Dockerfile",
     Ecosystem.APT: "apt.Dockerfile",
+    Ecosystem.PIP: "pip.Dockerfile",
 }
 
 _IMAGE_PREFIX = "depbot-sandbox"

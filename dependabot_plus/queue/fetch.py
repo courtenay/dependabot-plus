@@ -28,9 +28,9 @@ _ECOSYSTEM_KEYWORDS: dict[str, Ecosystem] = {
     "npm": Ecosystem.NPM,
     "bundler": Ecosystem.GEM,
     "rubygems": Ecosystem.GEM,
-    "pip": Ecosystem.NPM,
-    "docker": Ecosystem.APT,
-    "github_actions": Ecosystem.APT,
+    "pip": Ecosystem.PIP,
+    "docker": Ecosystem.DOCKER,
+    "github_actions": Ecosystem.GITHUB_ACTIONS,
     "apt": Ecosystem.APT,
 }
 
@@ -76,6 +76,11 @@ def detect_ecosystem(pr: dict, package_name: str = "") -> Ecosystem:
             if pm == keyword:
                 return eco
 
+    # Go modules have domain-style names: github.com/foo/bar — check early
+    # because grouped PRs may contain misleading keywords in the body
+    if package_name and _detect_go_from_package_name(package_name):
+        return Ecosystem.GO
+
     # Fallback: keyword search in body with word boundary context
     for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
         # Match keyword surrounded by non-alphanumeric chars or at boundaries
@@ -85,9 +90,6 @@ def detect_ecosystem(pr: dict, package_name: str = "") -> Ecosystem:
     for keyword, eco in _ECOSYSTEM_KEYWORDS.items():
         if any(keyword in label for label in labels):
             return eco
-    # Go modules have domain-style names: github.com/foo/bar
-    if package_name and _detect_go_from_package_name(package_name):
-        return Ecosystem.GO
     return Ecosystem.NPM
 
 

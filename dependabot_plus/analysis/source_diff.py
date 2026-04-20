@@ -8,8 +8,40 @@ import tempfile
 from dependabot_plus.queue.models import Ecosystem, QueueItem
 
 
+# __file__ is dependabot_plus/analysis/source_diff.py → repo root is three levels up
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _tool_versions_env() -> dict[str, str]:
+    """Parse .tool-versions and set ASDF_<TOOL>_VERSION env vars so asdf shims
+    work even when cwd is a temp directory outside the project tree."""
+    env: dict[str, str] = {}
+    tool_versions = os.path.join(_PROJECT_DIR, ".tool-versions")
+    if not os.path.exists(tool_versions):
+        return env
+    with open(tool_versions) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                tool = parts[0].upper()
+                env.setdefault(f"ASDF_{tool}_VERSION", parts[1])
+    return env
+
+
+_ASDF_ENV = _tool_versions_env()
+
+
 def _run(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=True)
+    env = os.environ.copy()
+    # When cwd is a temp directory, asdf shims fail because there is no
+    # .tool-versions file.  Propagate explicit version env vars so shims
+    # resolve correctly regardless of working directory.
+    for k, v in _ASDF_ENV.items():
+        env.setdefault(k, v)
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=True, env=env)
 
 
 def _diff_dirs(dir_a: str, dir_b: str) -> str:
@@ -140,11 +172,103 @@ def _fetch_go_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> st
     return "(go module diff unavailable — source could not be fetched)"
 
 
+def _fetch_pip_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> str:
+    """Download sdist tarballs from PyPI for both versions and diff."""
+    old_dir = os.path.join(workdir, "old")
+    new_dir = os.path.join(workdir, "new")
+    os.makedirs(old_dir)
+    os.makedirs(new_dir)
+
+    for d, ver in [(old_dir, old_ver), (new_dir, new_ver)]:
+        result = subprocess.run(
+            ["pip", "download", "--no-binary", ":all:", "--no-deps",
+             "-d", d, f"{package}=={ver}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return f"(pip source diff unavailable — could not download {package}=={ver})"
+        # Extract the sdist tarball
+        src_dir = os.path.join(d, "src")
+        os.makedirs(src_dir, exist_ok=True)
+        tarballs = [f for f in os.listdir(d) if f.endswith((".tar.gz", ".zip"))]
+        if not tarballs:
+            return f"(pip source diff unavailable — no sdist for {package}=={ver})"
+        if tarballs[0].endswith(".tar.gz"):
+            _run(["tar", "xzf", os.path.join(d, tarballs[0])], cwd=src_dir)
+        else:
+            _run(["unzip", "-q", os.path.join(d, tarballs[0])], cwd=src_dir)
+
+    return _diff_dirs(
+        os.path.join(old_dir, "src"),
+        os.path.join(new_dir, "src"),
+    )
+
+
+def _fetch_docker_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> str:
+    """Pull two Docker image tags and diff their exported filesystems."""
+    old_dir = os.path.join(workdir, "old", "rootfs")
+    new_dir = os.path.join(workdir, "new", "rootfs")
+    os.makedirs(old_dir)
+    os.makedirs(new_dir)
+
+    for d, ver in [(old_dir, old_ver), (new_dir, new_ver)]:
+        image = f"{package}:{ver}"
+        result = subprocess.run(
+            ["docker", "pull", image], capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return f"(docker diff unavailable — could not pull {image})"
+        # Create a container (not started) and export its filesystem
+        cid_result = subprocess.run(
+            ["docker", "create", image], capture_output=True, text=True,
+        )
+        if cid_result.returncode != 0:
+            return f"(docker diff unavailable — could not create container for {image})"
+        cid = cid_result.stdout.strip()
+        try:
+            export = subprocess.run(
+                ["docker", "export", cid],
+                capture_output=True, timeout=300,
+            )
+            tar_path = os.path.join(d, "..", "image.tar")
+            with open(tar_path, "wb") as f:
+                f.write(export.stdout)
+            _run(["tar", "xf", tar_path], cwd=d)
+        finally:
+            subprocess.run(["docker", "rm", cid], capture_output=True)
+
+    return _diff_dirs(old_dir, new_dir)
+
+
+def _fetch_github_actions_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> str:
+    """Clone a GitHub Action at two version tags and diff."""
+    old_dir = os.path.join(workdir, "old", "src")
+    new_dir = os.path.join(workdir, "new", "src")
+
+    for d, ver in [(old_dir, old_ver), (new_dir, new_ver)]:
+        url = f"https://github.com/{package}.git"
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", ver, url, d],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            return f"(github actions diff unavailable — could not clone {package}@{ver})"
+        # Remove .git directory to avoid noisy diff
+        git_dir = os.path.join(d, ".git")
+        if os.path.isdir(git_dir):
+            shutil.rmtree(git_dir)
+
+    return _diff_dirs(old_dir, new_dir)
+
+
 _FETCHER_NAMES = {
     Ecosystem.NPM: "_fetch_npm_diff",
     Ecosystem.GEM: "_fetch_gem_diff",
     Ecosystem.APT: "_fetch_apt_diff",
     Ecosystem.GO: "_fetch_go_diff",
+    Ecosystem.PIP: "_fetch_pip_diff",
+    Ecosystem.DOCKER: "_fetch_docker_diff",
+    Ecosystem.GITHUB_ACTIONS: "_fetch_github_actions_diff",
 }
 
 
@@ -161,10 +285,13 @@ def fetch_source_diff(item: QueueItem) -> str:
 
 
 _SOURCE_SUBDIRS = {
-    Ecosystem.NPM: "package",   # npm pack extracts to package/
-    Ecosystem.GEM: "src",       # gem untar extracts data.tar.gz to src/
-    Ecosystem.APT: "src",       # dpkg-source extracts to src/
-    Ecosystem.GO: "src",        # go mod download copies to src/
+    Ecosystem.NPM: "package",        # npm pack extracts to package/
+    Ecosystem.GEM: "src",            # gem untar extracts data.tar.gz to src/
+    Ecosystem.APT: "src",            # dpkg-source extracts to src/
+    Ecosystem.GO: "src",             # go mod download copies to src/
+    Ecosystem.PIP: "src",            # pip sdist extracts to src/
+    Ecosystem.DOCKER: "rootfs",      # docker export extracts to rootfs/
+    Ecosystem.GITHUB_ACTIONS: "src", # git clone into src/
 }
 
 
