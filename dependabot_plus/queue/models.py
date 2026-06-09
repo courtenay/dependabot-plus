@@ -11,6 +11,19 @@ class Ecosystem(str, Enum):
     GEM = "gem"
     APT = "apt"
     GO = "go"
+    PIP = "pip"
+    DOCKER = "docker"
+    GITHUB_ACTIONS = "github_actions"
+
+
+# Ecosystems that have full pipeline support (source diff + sandbox)
+SUPPORTED_ECOSYSTEMS = {
+    Ecosystem.NPM, Ecosystem.GEM, Ecosystem.APT, Ecosystem.GO,
+    Ecosystem.PIP, Ecosystem.DOCKER, Ecosystem.GITHUB_ACTIONS,
+}
+
+# Ecosystems where dynamic sandbox analysis is not applicable
+SKIP_DYNAMIC_ECOSYSTEMS = {Ecosystem.GO, Ecosystem.DOCKER, Ecosystem.GITHUB_ACTIONS}
 
 
 class Status(str, Enum):

@@ -10,7 +10,14 @@ dependabot-plus = "dependabot_plus.cli:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F"]
+ignore = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
