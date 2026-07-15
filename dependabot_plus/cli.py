@@ -5,6 +5,7 @@ import logging
 import shutil
 from pathlib import Path
 
+from dependabot_plus.analysis.autorun_scan import scan_diff_for_autorun
 from dependabot_plus.analysis.binary_scan import scan_diff_for_new_binaries
 from dependabot_plus.analysis.claude_review import review_diff
 from dependabot_plus.analysis.source_diff import fetch_source_with_dirs
@@ -123,8 +124,10 @@ def _analyse(item, mode="monitor"):
     workdir = None
     diff = ""
     binary_findings = []
+    autorun_findings = []
+    has_high_autorun = False
 
-    # Phase 1: Fetch source diff + binary scan
+    # Phase 1: Fetch source diff + binary scan + auto-run config scan
     log.info("  Fetching source diff...")
     try:
         diff, workdir, old_dir, new_dir = fetch_source_with_dirs(item)
@@ -139,24 +142,41 @@ def _analyse(item, mode="monitor"):
             f"{f.path}: {f.reason} ({f.size} bytes)"
             for f in bin_result.findings
         ]
+
+        log.info("  Scanning for editor/agent auto-run config...")
+        autorun_result = scan_diff_for_autorun(old_dir, new_dir)
+        if autorun_result.has_findings:
+            log.info(
+                "  Found %d auto-run config finding(s) (high=%s)",
+                len(autorun_result.findings), autorun_result.has_high,
+            )
+        autorun_findings = [f.describe() for f in autorun_result.findings]
+        has_high_autorun = autorun_result.has_high
     except Exception:
         log.exception("  Source diff failed, continuing with dynamic only")
 
     # Phase 2: Claude static review
     log.info("  Running Claude static review...")
-    if diff or binary_findings:
-        # Include binary findings in the prompt so Claude can factor them in
+    if diff or binary_findings or autorun_findings:
+        # Include pre-computed findings in the prompt so Claude can factor them in
         extra = ""
         if binary_findings:
-            extra = (
+            extra += (
                 "\n\nBinary file analysis also found these suspicious files:\n"
                 + "\n".join(f"- {f}" for f in binary_findings)
+            )
+        if autorun_findings:
+            extra += (
+                "\n\nEditor/agent auto-run config analysis flagged these "
+                "(zero-click execution risk):\n"
+                + "\n".join(f"- {f}" for f in autorun_findings)
             )
         static = review_diff(
             diff + extra, item.package_name, item.ecosystem.value,
         )
-        # Merge binary findings into static findings
+        # Merge pre-computed findings into static findings
         static.suspicious_patterns.extend(binary_findings)
+        static.suspicious_patterns.extend(autorun_findings)
     else:
         static = StaticFindings(summary="Source diff unavailable.")
 
@@ -184,6 +204,7 @@ def _analyse(item, mode="monitor"):
     # Determine overall risk
     risk = _overall_risk(
         static.risk_level, dynamic, bool(binary_findings), bool(blocked_network),
+        bool(autorun_findings), has_high_autorun,
     )
 
     summary_parts = []
@@ -196,6 +217,12 @@ def _analyse(item, mode="monitor"):
     if binary_findings:
         summary_parts.append(
             f"**Binary scan:** {len(binary_findings)} suspicious binary file(s) found."
+        )
+    if autorun_findings:
+        summary_parts.append(
+            f"**Auto-run config:** {len(autorun_findings)} editor/agent auto-run "
+            f"finding(s) (zero-click execution risk)"
+            + (" — includes high-severity" if has_high_autorun else "") + "."
         )
     if dynamic.file_accesses:
         summary_parts.append(
@@ -254,11 +281,16 @@ def _scan_install_logs_for_network(logs: str) -> list[str]:
 
 def _overall_risk(
     static_risk, dynamic, has_suspicious_binaries=False, has_blocked_network=False,
+    has_autorun=False, has_high_autorun=False,
 ):
     """Combine static and dynamic signals into an overall risk level."""
     if dynamic.file_accesses:
         return RiskLevel.HIGH
     if dynamic.sudo_attempts:
+        return RiskLevel.HIGH
+    # Zero-click auto-run config (VS Code folderOpen task, agent hooks) that is
+    # stealthy or runs a stager is HIGH; any auto-run config is at least MEDIUM.
+    if has_high_autorun:
         return RiskLevel.HIGH
     # HTTP requests with POST/PUT (data exfiltration) are HIGH
     # Any HTTP to non-registry hosts is at least MEDIUM
@@ -269,6 +301,8 @@ def _overall_risk(
     if http_reqs:
         return RiskLevel.MEDIUM
     if has_blocked_network:
+        return RiskLevel.MEDIUM
+    if has_autorun:
         return RiskLevel.MEDIUM
     if has_suspicious_binaries:
         return RiskLevel.MEDIUM if static_risk != RiskLevel.HIGH else RiskLevel.HIGH
