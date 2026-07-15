@@ -112,7 +112,16 @@ def _pre_download_npm(package: str, version: str, dest: str) -> None:
 
 
 def _pre_download_gem(package: str, version: str, dest: str) -> None:
-    """Download a gem file inside a container (network-enabled, host-isolated)."""
+    """Download a gem and its full dependency closure inside a container
+    (network-enabled, host-isolated).
+
+    ``gem fetch`` only downloads the named gem, not its dependencies, so an
+    offline ``gem install --local`` later fails to resolve them (e.g. jbuilder
+    needs actionview). We use ``gem install --explain`` to resolve the complete
+    set of name/version pairs *without executing any gem code*, then fetch each
+    one. Install scripts and native-extension builds therefore still run for the
+    first time inside the monitored sandbox, preserving the analysis.
+    """
     tag = image_tag(Ecosystem.GEM)
     try:
         subprocess.run(
@@ -122,13 +131,31 @@ def _pre_download_gem(package: str, version: str, dest: str) -> None:
     except subprocess.CalledProcessError:
         build_sandbox_image(Ecosystem.GEM)
 
+    # `gem install --explain` lists the resolved closure as indented
+    # "name-version[-platform]" lines under a "Gems to install:" header.
+    # awk finds the first hyphen-delimited field starting with a digit (the
+    # version), treats everything before it as the gem name, and emits
+    # "name version" so we can `gem fetch` each at the exact resolved version.
+    script = (
+        "set -o pipefail && cd /out && "
+        f"gem install --explain {package} -v {version} 2>&1 | "
+        "awk '/^  / {"
+        " n=split($1,a,\"-\"); vi=0;"
+        " for(i=1;i<=n;i++){ if(a[i] ~ /^[0-9]/){ vi=i; break } }"
+        " if(vi<2){ next }"
+        " name=a[1]; for(j=2;j<vi;j++){ name=name \"-\" a[j] }"
+        " print name, a[vi] }' | "
+        "while read -r gname gver; do "
+        " gem fetch \"$gname\" -v \"$gver\" || exit 1; "
+        "done"
+    )
     result = subprocess.run(
         [
             "docker", "run", "--rm",
             "-v", f"{dest}:/out",
             "--entrypoint", "bash",
             tag,
-            "-c", f"cd /out && gem fetch {package} -v {version} 2>&1",
+            "-c", script,
         ],
         capture_output=True,
         text=True,
@@ -172,7 +199,15 @@ def _pre_download_apt(package: str, version: str, dest: str) -> None:
 
 
 def _pre_download_pip(package: str, version: str, dest: str) -> None:
-    """Download a pip package inside a container (network-enabled, host-isolated)."""
+    """Download a pip package and its full dependency closure inside a container
+    (network-enabled, host-isolated).
+
+    ``pip download --no-deps`` fetches only the named package, so the offline
+    ``pip install --no-index`` later fails to resolve its dependencies. We omit
+    ``--no-deps`` so pip downloads the complete closure of wheels/sdists. pip's
+    download step does not run install hooks, so any setup.py/post-install code
+    still runs for the first time inside the monitored sandbox.
+    """
     tag = image_tag(Ecosystem.PIP)
     try:
         subprocess.run(
@@ -188,7 +223,7 @@ def _pre_download_pip(package: str, version: str, dest: str) -> None:
             "-v", f"{dest}:/out",
             "--entrypoint", "bash",
             tag,
-            "-c", f"cd /out && pip download --no-deps '{package}=={version}' 2>&1",
+            "-c", f"cd /out && pip download '{package}=={version}' 2>&1",
         ],
         capture_output=True,
         text=True,
