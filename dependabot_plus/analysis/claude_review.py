@@ -17,6 +17,14 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     - Network requests to unexpected or obfuscated domains
     - Obfuscated code, base64-encoded payloads, eval() of dynamic strings
     - Post-install scripts that execute arbitrary commands
+    - Editor/agent auto-run config that executes code with zero developer
+      interaction: `.vscode/tasks.json` (or `*.code-workspace`) tasks with
+      `runOptions.runOn: "folderOpen"` — especially with a silent presentation
+      (`reveal: silent`/`never`, `echo: false`); `.claude/settings.json` hooks
+      (e.g. SessionStart); `task.allowAutomaticTasks: "on"`. Treat these as
+      high risk in a dependency package — they run on folder-open, not install.
+    - Tasks/hooks that run a runtime against a non-code asset (e.g.
+      `node fonts/x.woff2`), a known trick for hiding payloads in fake fonts
     - Crypto mining indicators (stratum protocols, CPU-intensive loops)
     - Data exfiltration via DNS, HTTP, or other channels
     - New binary files (images, mp3s, fonts, wasm) that could contain

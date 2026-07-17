@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch
 
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
-from dependabot_plus.sandbox.runner import _parse_container_output, run_sandbox
+from dependabot_plus.sandbox.runner import (
+    _parse_container_output,
+    _pre_download_gem,
+    _pre_download_pip,
+    run_sandbox,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +166,46 @@ def test_canary_env_vars_passed_as_e_flags(
         idx = cmd.index("-e", cmd.index(flag) - 1)
         assert cmd[idx] == "-e"
         assert cmd[idx + 1] == flag
+
+
+@patch("dependabot_plus.sandbox.runner.subprocess.run")
+def test_pre_download_gem_resolves_dependency_closure(mock_subprocess_run):
+    """gem fetch alone misses dependencies (e.g. jbuilder needs actionview),
+    so the offline install would fail. The pre-download must resolve and fetch
+    the full closure without executing gem code."""
+    mock_subprocess_run.side_effect = [
+        MagicMock(returncode=0),  # docker image inspect
+        MagicMock(returncode=0, stdout="", stderr=""),  # docker run
+    ]
+
+    _pre_download_gem("jbuilder", "2.15.1", "/tmp/dest")
+
+    docker_run_call = mock_subprocess_run.call_args_list[-1]
+    script = docker_run_call.args[0][-1]
+    # Resolves the full closure code-free, then fetches each at its version.
+    assert "gem install --explain jbuilder -v 2.15.1" in script
+    assert "gem fetch" in script
+    # Must not install/build during pre-download — code only runs in the sandbox.
+    assert "gem install --explain" in script and "gem install /" not in script
+
+
+@patch("dependabot_plus.sandbox.runner.subprocess.run")
+def test_pre_download_pip_resolves_dependency_closure(mock_subprocess_run):
+    """pip download --no-deps misses dependencies, so the offline
+    --no-index install would fail. The pre-download must fetch the full
+    closure (no --no-deps) without running install hooks."""
+    mock_subprocess_run.side_effect = [
+        MagicMock(returncode=0),  # docker image inspect
+        MagicMock(returncode=0, stdout="", stderr=""),  # docker run
+    ]
+
+    _pre_download_pip("requests", "2.31.0", "/tmp/dest")
+
+    docker_run_call = mock_subprocess_run.call_args_list[-1]
+    script = docker_run_call.args[0][-1]
+    assert "pip download 'requests==2.31.0'" in script
+    # Must download the full closure, not just the named package.
+    assert "--no-deps" not in script
 
 
 @patch("dependabot_plus.sandbox.runner.generate_canary_files")
