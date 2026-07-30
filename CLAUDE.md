@@ -22,6 +22,7 @@ pytest
 - `dependabot_plus/cli.py` — argparse entrypoint with fetch/process/run subcommands
 - `dependabot_plus/queue/` — fetches Dependabot PRs via `gh`, parses titles, manages JSON queue
 - `dependabot_plus/analysis/source_diff.py` — downloads old/new package versions and diffs them
+- `dependabot_plus/analysis/autorun_scan.py` — detects zero-click editor/agent auto-run config (`.vscode/tasks.json` `runOn: folderOpen`, `*.code-workspace` tasks, `.claude/settings.json` hooks)
 - `dependabot_plus/analysis/claude_review.py` — sends diffs to `claude -p` for security review
 - `dependabot_plus/sandbox/canary.py` — generates fake secrets (env vars + credential files)
 - `dependabot_plus/sandbox/dockerfiles/` — per-ecosystem Dockerfiles with inotifywait monitoring
