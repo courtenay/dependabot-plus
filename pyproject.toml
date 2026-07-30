@@ -26,4 +26,4 @@ markers = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.4.2"]
