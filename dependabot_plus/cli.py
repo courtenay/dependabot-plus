@@ -23,7 +23,7 @@ from dependabot_plus.queue.models import (
     save_queue,
 )
 from dependabot_plus.report.github import add_label, post_report
-from dependabot_plus.sandbox.runner import run_sandbox
+from dependabot_plus.sandbox.runner import DOWNLOAD_FAILED, run_sandbox
 
 logging.basicConfig(
     level=logging.INFO,
@@ -207,7 +207,18 @@ def _analyse(item, mode="monitor"):
         bool(autorun_findings), has_high_autorun,
     )
 
+    # The package never made it into the sandbox, so a clean result proves
+    # nothing — never let that pass as LOW (which would auto-apply deps-vetted).
+    download_failed = dynamic.install_exit_code == DOWNLOAD_FAILED
+    if download_failed and risk == RiskLevel.LOW:
+        risk = RiskLevel.UNKNOWN
+
     summary_parts = []
+    if download_failed:
+        summary_parts.append(
+            "**Dynamic:** skipped — the package could not be downloaded, "
+            "so no sandboxed install was performed."
+        )
     if static.summary:
         summary_parts.append(f"**Static:** {static.summary}")
     if dynamic.sudo_attempts:
@@ -237,7 +248,7 @@ def _analyse(item, mode="monitor"):
         summary_parts.append(
             f"**Network:** {len(dynamic.network_attempts)} network event(s) captured."
         )
-    if dynamic.install_exit_code != 0 and dynamic.install_exit_code != -1:
+    if dynamic.install_exit_code > 0:
         summary_parts.append(
             f"**Install failed** with exit code {dynamic.install_exit_code}."
         )

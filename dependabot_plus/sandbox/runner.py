@@ -16,6 +16,10 @@ from dependabot_plus.sandbox.canary import (
     generate_canary_files,
 )
 
+# Sentinel install_exit_code values (a real install never returns a negative)
+NOT_SUPPORTED = -1    # ecosystem has no sandbox support yet
+DOWNLOAD_FAILED = -2  # package could not be fetched, so nothing was executed
+
 _INSTALL_COMMANDS = {
     Ecosystem.NPM: lambda pkg, ver: f"npm install {pkg}@{ver}",
     Ecosystem.GEM: lambda pkg, ver: f"gem install {pkg} -v {ver}",
@@ -349,13 +353,30 @@ def run_sandbox(item: QueueItem, mode: str = "monitor") -> SandboxResult:
         if downloader is None:
             log.info("  Skipping dynamic analysis: %s not supported yet", item.ecosystem.value)
             return SandboxResult(
-                install_exit_code=-1,
+                install_exit_code=NOT_SUPPORTED,
                 install_logs=f"Dynamic analysis not yet supported for {item.ecosystem.value}",
                 file_accesses=[],
                 network_attempts=[],
             )
         log.info("  Downloading %s@%s ...", item.package_name, item.new_version)
-        downloader(item.package_name, item.new_version, pkg_dir)
+        try:
+            downloader(item.package_name, item.new_version, pkg_dir)
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            # The package could not be fetched (not on the public registry,
+            # yanked version, transient registry error). Static analysis has
+            # already run, so report what we have instead of losing the item —
+            # the caller downgrades the verdict since nothing was executed.
+            log.error(
+                "  Pre-download of %s@%s failed: %s",
+                item.package_name, item.new_version, exc,
+            )
+            return SandboxResult(
+                install_exit_code=DOWNLOAD_FAILED,
+                install_logs=f"Pre-download failed for {item.package_name}@"
+                             f"{item.new_version} ({item.ecosystem.value}):\n{exc}",
+                file_accesses=[],
+                network_attempts=[],
+            )
         log.info("  Package downloaded, starting sandboxed install ...")
 
         return _run_container(
