@@ -139,12 +139,190 @@ _GROUPED_UPDATE_RE = re.compile(
 )
 
 
+# Dependabot states the real total in the title: "... with 19 updates".
+_UPDATE_COUNT_RE = re.compile(r"with\s+(\d+)\s+updates?\b", re.IGNORECASE)
+
+
 def parse_grouped_pr_body(body: str) -> list[tuple[str, str, str]]:
-    """Extract multiple (package_name, old_version, new_version) from a grouped PR body."""
+    """Extract multiple (package_name, old_version, new_version) from a grouped PR body.
+
+    Kept for ecosystems with no manifest parser, and as a last resort. The body
+    is NOT a reliable spec: dependabot truncates grouped bodies (soffi-main
+    #3264's title says 19 updates, its body lists 8), which silently dropped 11
+    gems from a derived plan. Prefer parse_grouped_pr_diff.
+    """
     return [
         (m.group(1), m.group(2), m.group(3))
         for m in _GROUPED_UPDATE_RE.finditer(body or "")
     ]
+
+
+def parse_declared_update_count(title: str) -> int | None:
+    """The number of updates dependabot says the PR contains, if it says."""
+    m = _UPDATE_COUNT_RE.search(title or "")
+    return int(m.group(1)) if m else None
+
+
+# --- manifest line parsers, keyed by the file a hunk belongs to -------------
+# Each returns (package, version) for one changed manifest line, or None.
+
+
+def _npm_manifest_line(line: str) -> tuple[str, str] | None:
+    m = re.match(r'\s*"([^"]+)"\s*:\s*"[~^>=< ]*([0-9][^"]*)"', line)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _go_manifest_line(line: str) -> tuple[str, str] | None:
+    # The optional `require ` prefix is load-bearing: go.mod holds modules both
+    # as standalone `require mod vX` lines and inside a `require (...)` block,
+    # and dependabot moves modules between the two. Missing the prefixed form
+    # hides the removal half, making a relocation look like a brand-new
+    # dependency (soffi-main #3284 moves google.golang.org/protobuf into the
+    # block at an unchanged version).
+    m = re.match(r"\s*(?:require\s+)?([a-z0-9.\-]+\.[a-z]+\S*)\s+v([0-9]\S*)", line)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _gem_lock_line(line: str) -> tuple[str, str] | None:
+    # Exactly four spaces marks a top-level gem; six marks its constraints.
+    m = re.match(r"    ([A-Za-z0-9_.\-]+) \(([0-9][^)\-]*)", line)
+    return (m.group(1), m.group(2)) if m else None
+
+
+_MANIFEST_PARSERS = (
+    (re.compile(r"(^|/)package\.json$"), _npm_manifest_line),
+    (re.compile(r"(^|/)go\.mod$"), _go_manifest_line),
+    (re.compile(r"(^|/)Gemfile\.lock$"), _gem_lock_line),
+)
+
+
+def _parser_for(path: str):
+    for pattern, parser in _MANIFEST_PARSERS:
+        if pattern.search(path):
+            return parser
+    return None
+
+
+def _manifest_changes(diff: str):
+    """(removed, added, order) keyed by (path, package) across manifest hunks."""
+    removed: dict[tuple[str, str], str] = {}
+    added: dict[tuple[str, str], str] = {}
+    order: list[tuple[str, str]] = []
+    parser = None
+    path = ""
+
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            path = parts[2][2:] if len(parts) > 2 else ""
+            parser = _parser_for(path)
+            continue
+        if parser is None or line.startswith(("+++", "---")):
+            continue
+        if line.startswith(("+", "-")):
+            parsed = parser(line[1:])
+            if not parsed:
+                continue
+            package, version = parsed
+            key = (path, package)
+            if key not in removed and key not in added:
+                order.append(key)
+            (added if line.startswith("+") else removed)[key] = version
+
+    return removed, added, order
+
+
+def parse_grouped_pr_diff(diff: str) -> list[tuple[str, str, str]]:
+    """Extract (package, old_version, new_version) from a PR's manifest hunks.
+
+    The diff is the only complete record of what a grouped PR changes. A bump
+    rewrites a declared version, so a package is reported only when the same
+    manifest shows both a removed and an added version for it — which also
+    filters unrelated additions. Packages that are only *added* are not bumps;
+    see parse_added_packages.
+    """
+    removed, added, order = _manifest_changes(diff)
+    bumps: list[tuple[str, str, str]] = []
+    for key in order:
+        old, new = removed.get(key), added.get(key)
+        if old and new and old != new:
+            bumps.append((key[1], old, new))
+    return bumps
+
+
+def parse_added_packages(diff: str) -> list[tuple[str, str]]:
+    """(package, version) for packages the PR ADDS, with no prior version.
+
+    These are not bumps — they are dependencies entering the tree for the first
+    time, usually pulled in transitively by one of the bumps (soffi-main #3286
+    adds activeagents-telemetry 0.3.0 as a new requirement of activeagent
+    1.5.2). A version-to-version diff cannot describe them, so the analysis
+    pipeline has nothing to compare and they are easy to miss entirely — which
+    is the worst outcome for the one category that is wholly unreviewed code.
+    """
+    removed, added, order = _manifest_changes(diff)
+    return [(key[1], added[key]) for key in order
+            if key in added and key not in removed]
+
+
+def fetch_pr_diff(repo: str, pr_number: int) -> str | None:
+    """The PR's diff, or None when it cannot be read.
+
+    None means "could not tell", never "nothing changed" — the caller must not
+    conflate them. Collapsing those two is how truncated body data silently
+    became the spec in the first place.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number), "--repo", repo],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return result.stdout or None
+
+
+def grouped_packages(repo: str, pr: dict) -> tuple[list[tuple[str, str, str]], bool]:
+    """Packages for a grouped PR, plus whether that list is known to be complete.
+
+    Incomplete coverage is the dangerous case: analysing 7 of 10 packages and
+    finding them all LOW would otherwise earn the PR a deps-vetted label that
+    never covered the other 3. The title states the real total, so assert
+    against it rather than trusting whatever the parser happened to return.
+    """
+    declared = parse_declared_update_count(pr.get("title", ""))
+    diff = fetch_pr_diff(repo, pr["number"])
+
+    if diff is None:
+        print(f"  PR #{pr['number']}: diff unreadable — falling back to the "
+              f"(truncatable) body; coverage NOT complete")
+        return parse_grouped_pr_body(pr.get("body", "")), False
+
+    packages = parse_grouped_pr_diff(diff)
+    if not packages:
+        # No manifest parser matched (docker, github_actions, ...). Those
+        # bodies are short and do not truncate in practice, but completeness
+        # still cannot be asserted from them.
+        return parse_grouped_pr_body(pr.get("body", "")), False
+
+    distinct = len({name for name, _, _ in packages})
+    complete = declared is None or distinct >= declared
+    if not complete:
+        print(f"  PR #{pr['number']}: title declares {declared} updates but "
+              f"{distinct} parsed from the diff — coverage incomplete")
+
+    # A package with no prior version is unreviewed code entering the tree, and
+    # a version-to-version analysis cannot say anything about it. Refusing the
+    # label is the honest verdict — measured at 2 of 10 open PRs, so this
+    # reports a real and rare event rather than blocking the pipeline.
+    for name, version in parse_added_packages(diff):
+        print(f"  PR #{pr['number']}: introduces NEW package {name} {version} "
+              f"— no prior version to diff against; coverage incomplete")
+        complete = False
+
+    return packages, complete
 
 
 def _detect_from_body(body: str, keywords: set[str]) -> Ecosystem | None:
@@ -234,11 +412,11 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
             continue
         parsed = parse_pr_title(pr["title"])
         if parsed:
-            # Single-package PR
-            packages = [parsed]
+            # Single-package PR: the title names the one bump in full, and
+            # titles are never truncated.
+            packages, coverage_complete = [parsed], True
         else:
-            # Try grouped PR format: "Updates `pkg` from X to Y" in body
-            packages = parse_grouped_pr_body(pr.get("body", ""))
+            packages, coverage_complete = grouped_packages(repo, pr)
         if not packages:
             continue
         # Deduplicate within a single PR (same package can appear
@@ -258,6 +436,7 @@ def fetch_dependabot_prs(repo: str) -> list[QueueItem]:
                     package_name=package_name,
                     old_version=old_version,
                     new_version=new_version,
+                    coverage_complete=coverage_complete,
                 )
             )
     return items

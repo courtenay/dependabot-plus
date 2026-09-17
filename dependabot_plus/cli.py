@@ -103,8 +103,19 @@ def cmd_process(args: argparse.Namespace) -> None:
         pr_items = [i for i in all_items if i.pr_number == pr_number]
         all_done = all(i.status in (Status.DONE, Status.FAILED) for i in pr_items)
         all_low = all(r == RiskLevel.LOW for r in risks)
+        # All-LOW says nothing about packages we never enumerated. A PR whose
+        # package list could not be shown to be complete is not vettable,
+        # however clean the packages we did see turned out to be.
+        complete = all(i.coverage_complete for i in pr_items)
 
-        if all_done and all_low:
+        if all_done and all_low and not complete:
+            log.warning(
+                "PR #%d: all analysed packages LOW, but its package list is "
+                "incomplete — NOT labelling. Re-run fetch once the diff is "
+                "readable.", pr_number,
+            )
+
+        if all_done and all_low and complete:
             repo = pr_items[0].repo
             log.info("PR #%d: all packages LOW — adding deps-vetted label", pr_number)
             try:
