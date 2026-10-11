@@ -23,7 +23,7 @@ from dependabot_plus.queue.models import (
     save_queue,
 )
 from dependabot_plus.report.github import add_label, post_report
-from dependabot_plus.sandbox.runner import run_sandbox
+from dependabot_plus.sandbox.runner import DOWNLOAD_FAILED, run_sandbox
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,8 +103,19 @@ def cmd_process(args: argparse.Namespace) -> None:
         pr_items = [i for i in all_items if i.pr_number == pr_number]
         all_done = all(i.status in (Status.DONE, Status.FAILED) for i in pr_items)
         all_low = all(r == RiskLevel.LOW for r in risks)
+        # All-LOW says nothing about packages we never enumerated. A PR whose
+        # package list could not be shown to be complete is not vettable,
+        # however clean the packages we did see turned out to be.
+        complete = all(i.coverage_complete for i in pr_items)
 
-        if all_done and all_low:
+        if all_done and all_low and not complete:
+            log.warning(
+                "PR #%d: all analysed packages LOW, but its package list is "
+                "incomplete — NOT labelling. Re-run fetch once the diff is "
+                "readable.", pr_number,
+            )
+
+        if all_done and all_low and complete:
             repo = pr_items[0].repo
             log.info("PR #%d: all packages LOW — adding deps-vetted label", pr_number)
             try:
@@ -207,7 +218,18 @@ def _analyse(item, mode="monitor"):
         bool(autorun_findings), has_high_autorun,
     )
 
+    # The package never made it into the sandbox, so a clean result proves
+    # nothing — never let that pass as LOW (which would auto-apply deps-vetted).
+    download_failed = dynamic.install_exit_code == DOWNLOAD_FAILED
+    if download_failed and risk == RiskLevel.LOW:
+        risk = RiskLevel.UNKNOWN
+
     summary_parts = []
+    if download_failed:
+        summary_parts.append(
+            "**Dynamic:** skipped — the package could not be downloaded, "
+            "so no sandboxed install was performed."
+        )
     if static.summary:
         summary_parts.append(f"**Static:** {static.summary}")
     if dynamic.sudo_attempts:
@@ -237,7 +259,7 @@ def _analyse(item, mode="monitor"):
         summary_parts.append(
             f"**Network:** {len(dynamic.network_attempts)} network event(s) captured."
         )
-    if dynamic.install_exit_code != 0 and dynamic.install_exit_code != -1:
+    if dynamic.install_exit_code > 0:
         summary_parts.append(
             f"**Install failed** with exit code {dynamic.install_exit_code}."
         )

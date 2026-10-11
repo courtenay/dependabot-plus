@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
 from dependabot_plus.sandbox.runner import (
+    DOWNLOAD_FAILED,
     _parse_container_output,
     _pre_download_gem,
     _pre_download_pip,
@@ -231,3 +232,26 @@ def test_run_sandbox_handles_string_file_accesses(
         {"raw": "/root/.ssh/id_rsa"},
         {"path": "/root/.env"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Pre-download failures (404 / yanked version / private registry)
+# ---------------------------------------------------------------------------
+
+@patch("dependabot_plus.sandbox.runner.subprocess.run")
+def test_run_sandbox_download_failure_is_not_fatal(mock_subprocess_run):
+    """A package that cannot be fetched must not abort the whole item —
+    static analysis has already run and still needs reporting."""
+    mock_subprocess_run.side_effect = [
+        MagicMock(returncode=0),  # sandbox image exists
+        MagicMock(returncode=0),  # pre-download image exists
+        MagicMock(returncode=1, stdout="npm error code E404", stderr=""),
+    ]
+
+    result = run_sandbox(_make_item(package_name="sentry-ruby"), mode="strict")
+
+    assert result.install_exit_code == DOWNLOAD_FAILED
+    assert "sentry-ruby" in result.install_logs
+    assert result.file_accesses == []
+    # The sandbox container must never be started without a package
+    assert mock_subprocess_run.call_count == 3

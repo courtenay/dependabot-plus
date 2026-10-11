@@ -49,6 +49,12 @@ class QueueItem:
     old_version: str
     new_version: str
     status: Status = Status.QUEUED
+    # False when this PR's package list could not be shown to be complete: the
+    # diff was unreadable, or fewer packages were parsed than the title
+    # declares. Such a PR must never be auto-labelled — all-LOW over a partial
+    # list is not a verdict on the PR. Defaults True so rows written before
+    # this field existed keep their previous meaning.
+    coverage_complete: bool = True
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -66,6 +72,7 @@ class QueueItem:
             old_version=d["old_version"],
             new_version=d["new_version"],
             status=Status(d.get("status", "queued")),
+            coverage_complete=d.get("coverage_complete", True),
         )
 
 

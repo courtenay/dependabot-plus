@@ -84,6 +84,7 @@ class TestQueueItemRoundtrip:
             "old_version",
             "new_version",
             "status",
+            "coverage_complete",
         }
         assert set(d.keys()) == expected_keys
 
