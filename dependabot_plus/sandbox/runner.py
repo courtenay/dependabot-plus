@@ -5,6 +5,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import uuid
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
 from dependabot_plus.sandbox.builder import build_sandbox_image, image_tag
@@ -14,6 +15,7 @@ from dependabot_plus.sandbox.canary import (
     generate_canary_files,
 )
 from dependabot_plus.sandbox.detectors import RuntimeDetector, default_detectors
+from dependabot_plus.sandbox.falco import RUN_LABEL, FalcoDetector, FalcoSidecar
 
 log = logging.getLogger("dependabot_plus")
 
@@ -258,18 +260,36 @@ def _run_container(
     extra_volumes: list[tuple[str, str]] | None = None,
     mode: str = "monitor",
     detectors: list[RuntimeDetector] | None = None,
+    falco: str = "off",
 ) -> SandboxResult:
     """Core container execution with canary traps.
 
     mode="strict": --network=none, no network logging
     mode="monitor": network enabled, tcpdump runs inside the container
                     capturing DNS lookups and TCP connections
+    falco="shadow": a Falco sidecar watches the container; its findings are
+                    recorded but never scored (see risk.assess).
     """
     detectors = default_detectors() if detectors is None else detectors
+    run_id = uuid.uuid4().hex[:12]
+    sidecar, falco_unavailable = None, None
+    if falco == "shadow":
+        sidecar = FalcoSidecar(run_id, ecosystem)
+        try:
+            log.info("  Starting Falco sidecar (shadow) ...")
+            sidecar.start()
+        except Exception as e:  # shadow signal must never break the vet
+            falco_unavailable = str(e) or type(e).__name__
+            log.warning("  Falco unavailable: %s", falco_unavailable)
+            sidecar.close()
+            sidecar = None
+        detectors = [*detectors, FalcoDetector(run_id)]
     canary_env = generate_canary_env()
     canary_files = generate_canary_files()
 
     cmd = ["docker", "run", "--rm"]
+    if sidecar is not None:
+        cmd.extend(["--label", f"{RUN_LABEL}={run_id}"])
 
     if mode == "monitor":
         # Network enabled — tcpdump inside the container captures traffic
@@ -296,11 +316,26 @@ def _run_container(
 
     cmd.append(tag)
 
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=600,
-    )
+    falco_events: list[dict] = []
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+        )
+        if sidecar is not None:
+            try:
+                falco_events = sidecar.finish()
+            except Exception as e:
+                falco_unavailable = f"could not collect events: {e}"
+                log.warning("  Falco unavailable: %s", falco_unavailable)
+    finally:
+        if sidecar is not None:
+            sidecar.close()
 
     output = _parse_container_output(result.stdout)
+    if falco == "shadow":
+        output["falco_events"] = falco_events
+        if falco_unavailable:
+            output["falco_unavailable"] = falco_unavailable
     access_dicts = _parse_file_accesses(
         output.get("file_accesses", []), ecosystem,
     )
@@ -328,6 +363,12 @@ def _run_container(
     for detector in detectors:
         detector_findings.extend(f.to_dict() for f in detector.evaluate(output, ecosystem))
 
+    falco_status = {}
+    for detector in detectors:
+        if isinstance(detector, FalcoDetector):
+            falco_status = detector.status(output).to_dict()
+            log.info("  Falco (shadow): %s %s", falco_status["state"], falco_status.get("reason", ""))
+
     sudo_attempts = output.get("sudo_attempts", [])
 
     exit_code = output.get("install_exit_code", result.returncode)
@@ -346,10 +387,11 @@ def _run_container(
         sudo_attempts=sudo_attempts,
         detector_findings=detector_findings,
         dns_answers=output.get("dns_answers", {}),
+        falco=falco_status,
     )
 
 
-def run_sandbox(item: QueueItem, mode: str = "monitor") -> SandboxResult:
+def run_sandbox(item: QueueItem, mode: str = "monitor", falco: str = "off") -> SandboxResult:
     """Pre-download the package, then install it in a monitored sandbox.
 
     mode="monitor": network enabled with tcpdump sidecar (default)
@@ -388,6 +430,7 @@ def run_sandbox(item: QueueItem, mode: str = "monitor") -> SandboxResult:
             ecosystem=item.ecosystem,
             extra_volumes=[(pkg_dir, "/pkg:ro")],
             mode=mode,
+            falco=falco,
         )
     finally:
         shutil.rmtree(pkg_dir, ignore_errors=True)

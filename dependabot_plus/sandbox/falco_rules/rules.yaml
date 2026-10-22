@@ -1,0 +1,74 @@
+# Falco rules for the DependabotPlus sandbox (shadow mode).
+#
+# Rendered per run by dependabot_plus/sandbox/falco.py, which substitutes the
+# double-underscore DP placeholders. Rules are scoped to the sandbox container through the
+# dot-free label dp_run (docker shows it in container.labels as "dp_run:<id>");
+# a label key containing dots breaks Falco's rule parser. The deprecated
+# direction field is deliberately unused (Falco 0.43).
+#
+# Phase (install vs post_install) is not decided here: the detector compares
+# each event's timestamp with the entrypoint's INSTALL_END marker.
+
+- list: dp_canary_paths
+  items: __DP_CANARY_PATHS__
+
+- list: dp_write_allowed
+  items: __DP_WRITE_ALLOWED__
+
+- list: dp_suspicious_tools
+  items: [curl, wget, nc, ncat, netcat, sudo]
+
+- list: dp_shells
+  items: [sh, bash, dash]
+
+- macro: dp_sandbox
+  condition: container.id != host and container.labels contains "dp_run:__DP_RUN_ID__"
+
+- macro: dp_open_event
+  condition: evt.type in (open, openat, openat2)
+
+# Readiness probe: the runner opens /etc/os-release from a labelled probe
+# container and waits for this event before starting the install.
+- rule: DP Heartbeat
+  desc: runner readiness probe
+  condition: dp_open_event and container.id != host and container.labels contains "dp_hb:__DP_RUN_ID__" and fd.name = /etc/os-release
+  output: "DPFALCO heartbeat proc=%proc.name fd=%fd.name labels=%container.labels"
+  priority: DEBUG
+  tags: [dp_heartbeat]
+
+# Setup noise excluded below: runc init opens /proc paths before exec, the
+# entrypoint (as root) lays the canary files, and getaddrinfo probes connect to
+# port 0. Reads of a canary file are the signal; the layer's own writes are not.
+- rule: DP Canary read
+  desc: a canary credential file was opened
+  condition: dp_open_event and dp_sandbox and evt.is_open_read=true and fd.name in (dp_canary_paths)
+  output: "DPFALCO canary_read proc=%proc.name fd=%fd.name cmd=%proc.cmdline labels=%container.labels"
+  priority: WARNING
+  tags: [dp_canary_read]
+
+- rule: DP Write outside allowed
+  desc: a file was opened for writing outside the per-ecosystem allowed directories
+  condition: dp_open_event and dp_sandbox and evt.is_open_write=true and not proc.name startswith "runc:" and not (proc.pname = entrypoint.sh and fd.name in (dp_canary_paths)) and not fd.name pmatch (dp_write_allowed)
+  output: "DPFALCO write_outside proc=%proc.name fd=%fd.name cmd=%proc.cmdline labels=%container.labels"
+  priority: WARNING
+  tags: [dp_write_outside]
+
+# `su ... -c` in the sandbox entrypoint starts the install itself; skip it.
+- rule: DP Suspicious exec
+  desc: curl/wget/nc/sudo, or a shell started with -c
+  condition: >
+    evt.type in (execve, execveat) and dp_sandbox and
+    (proc.name in (dp_suspicious_tools) or
+     (proc.name in (dp_shells) and proc.args startswith "-c" and not proc.pname = su))
+  output: "DPFALCO exec proc=%proc.name cmd=%proc.cmdline labels=%container.labels"
+  priority: WARNING
+  tags: [dp_exec]
+
+- rule: DP Outbound connect
+  desc: outbound IPv4/IPv6 connection (loopback excluded)
+  condition: >
+    evt.type = connect and dp_sandbox and fd.typechar in (4, 6) and
+    fd.sip != "127.0.0.1" and fd.sip != "::1" and fd.sip != "0.0.0.0" and fd.sport != 0
+  output: "DPFALCO connect proc=%proc.name fd=%fd.name labels=%container.labels"
+  priority: NOTICE
+  tags: [dp_connect]

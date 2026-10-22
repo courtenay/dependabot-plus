@@ -81,6 +81,9 @@ class SandboxResult:
     detector_findings: list[dict] = field(default_factory=list)
     # IP -> hostnames that resolved to it, from DNS answers seen in the sandbox.
     dns_answers: dict[str, list[str]] = field(default_factory=dict)
+    # Falco shadow-mode status: {"state": ok|unverified|unavailable, "reason": str}.
+    # Empty when --falco is off. Never affects scoring.
+    falco: dict = field(default_factory=dict)
 
 
 @dataclass
