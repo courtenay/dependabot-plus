@@ -35,17 +35,32 @@ if [ -n "$CANARY_WATCH_PATHS" ]; then
     done
 fi
 
+# --- Watch for writes/creates outside the install dir and tmp (as root) ---
+# Detector: dependabot_plus/sandbox/detectors.py (InotifyWriteDetector). It owns
+# the allow/deny policy; this only records raw events as "EVENTS|path".
+WRITES_LOG="/var/log/writes.log"
+touch "$WRITES_LOG"
+if [ -n "$WRITE_WATCH_PATHS" ]; then
+    echo "$WRITE_WATCH_PATHS" | while read -r p; do
+        p="${p//\/root/$SANDBOX_HOME}"
+        if [ -d "$p" ]; then
+            inotifywait -m -r -q -e create -e modify -e close_write -e moved_to \
+                --format '%e|%w%f' "$p" >> "$WRITES_LOG" 2>&1 &
+        fi
+    done
+fi
+
 # --- Start tcpdump if in monitor mode (requires root) ---
 NETWORK_LOG="/var/log/network.log"
 touch "$NETWORK_LOG"
 
 if [ "$MONITOR_NETWORK" = "1" ]; then
     # Capture 1: TCP connections (IPv4, outbound only, skip Docker noise)
-    tcpdump -i any -nn -l -q 'ip and tcp' 2>/dev/null | while read -r line; do
+    tcpdump -i any -nn -tt -l -q 'ip and tcp' 2>/dev/null | while read -r line; do
         echo "$line" >> /var/log/network.log
     done &
     # Capture 2: DNS queries with full decode — shows actual domain names
-    tcpdump -i any -nn -l -v 'udp port 53' 2>/dev/null \
+    tcpdump -i any -nn -tt -l -v 'udp port 53' 2>/dev/null \
         > /var/log/dns.log &
     # Capture 3: ASCII payload dump — captures HTTP methods, headers, POST bodies
     tcpdump -i any -nn -l -A -s 2048 'tcp port 80 or tcp port 443 or tcp port 8080' ip 2>/dev/null \
@@ -64,6 +79,9 @@ INSTALL_LOG="/var/log/install.log"
 INSTALL_EXIT=0
 su -s /bin/bash "$SANDBOX_USER" -c "cd /sandbox && $INSTALL_CMD" > "$INSTALL_LOG" 2>&1 || INSTALL_EXIT=$?
 
+# Events after this instant count as "post_install" (detached/background activity)
+INSTALL_END=$(date +%s.%N)
+
 # Give a moment for async operations
 sleep 2
 
@@ -72,86 +90,5 @@ pkill -f inotifywait 2>/dev/null || true
 pkill -f tcpdump 2>/dev/null || true
 sleep 0.3
 
-# --- Output results as JSON ---
-python3 -c "
-import json, os
-
-with open('/var/log/canary.log') as f:
-    canary_lines = [l.strip() for l in f if l.strip()]
-
-with open('/var/log/install.log') as f:
-    install_log = f.read()
-
-# Parse network captures — log everything, classify later
-import re
-
-dns_queries = []
-tcp_connections = []
-
-# Parse DNS log — extract queried domain names
-if os.path.exists('/var/log/dns.log'):
-    with open('/var/log/dns.log') as f:
-        for line in f:
-            # tcpdump -v shows DNS queries like: A? registry.npmjs.org.
-            m = re.search(r'(\w+\?)\s+(\S+)', line)
-            if m:
-                qtype, domain = m.group(1), m.group(2).rstrip('.')
-                dns_queries.append(f'{qtype} {domain}')
-
-# Parse TCP connections — outbound only
-if os.path.exists('/var/log/network.log'):
-    seen_dests = set()
-    with open('/var/log/network.log') as f:
-        for line in f:
-            line = line.strip()
-            if not line or ' In ' in line:
-                continue
-            # Extract destination IP:port, deduplicate
-            m = re.search(r'> (\d+\.\d+\.\d+\.\d+\.\d+):', line)
-            if m:
-                dest = m.group(1)
-                if dest not in seen_dests:
-                    seen_dests.add(dest)
-                    tcp_connections.append(dest)
-
-# Parse payload captures — extract HTTP methods, hosts, and POST bodies
-http_requests = []
-if os.path.exists('/var/log/payload.log'):
-    with open('/var/log/payload.log') as f:
-        content = f.read()
-    # Find HTTP request lines (GET /path, POST /path, etc.)
-    for m in re.finditer(r'(GET|POST|PUT|DELETE|PATCH) (\S+) HTTP', content):
-        method, path = m.group(1), m.group(2)
-        # Look for Host header nearby
-        host_m = re.search(r'Host:\s*(\S+)', content[m.start():m.start()+500])
-        host = host_m.group(1) if host_m else 'unknown'
-        entry = {'method': method, 'path': path, 'host': host}
-        # For POST/PUT, try to grab the body (first 500 chars after headers)
-        if method in ('POST', 'PUT'):
-            body_start = content.find('\r\n\r\n', m.start())
-            if body_start > 0:
-                body = content[body_start+4:body_start+504].strip()
-                if body:
-                    entry['body_preview'] = body[:500]
-        http_requests.append(entry)
-
-# Parse sudo attempts
-sudo_attempts = []
-if os.path.exists('/var/log/sudo.log'):
-    with open('/var/log/sudo.log') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                sudo_attempts.append(line)
-
-result = {
-    'install_exit_code': $INSTALL_EXIT,
-    'install_log': install_log[-10000:],
-    'file_accesses': canary_lines,
-    'dns_queries': dns_queries,
-    'tcp_connections': tcp_connections,
-    'http_requests': http_requests,
-    'sudo_attempts': sudo_attempts,
-}
-print(json.dumps(result))
-"
+# --- Output results as JSON (parsing lives in collect_report.py, unit tested) ---
+python3 /collect_report.py "$INSTALL_EXIT" "$INSTALL_END"

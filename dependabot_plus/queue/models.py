@@ -76,6 +76,11 @@ class SandboxResult:
     file_accesses: list[dict] = field(default_factory=list)
     network_attempts: list[dict] = field(default_factory=list)
     sudo_attempts: list[str] = field(default_factory=list)
+    # Findings from runtime detectors (see sandbox/detectors.py), as dicts
+    # {kind, path, risk, category, detail}.
+    detector_findings: list[dict] = field(default_factory=list)
+    # IP -> hostnames that resolved to it, from DNS answers seen in the sandbox.
+    dns_answers: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,6 +96,10 @@ class Verdict:
     static_findings: StaticFindings
     dynamic_findings: SandboxResult
     summary: str
+    # True only when risk is backed by deterministic evidence of safety (a clean
+    # sandbox run, or an explicit per-ecosystem rule). The LLM alone never vets.
+    vetted: bool = False
+    vetting_note: str = ""
 
 
 def load_queue(path: Path) -> list[QueueItem]:

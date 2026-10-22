@@ -26,6 +26,13 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
         verdict.summary,
         "",
     ]
+    if verdict.risk_level == RiskLevel.LOW and not verdict.vetted:
+        lines[5:5] = [
+            "> **Not eligible for `deps-vetted`:** no deterministic evidence of safety "
+            "(a clean sandbox run, or for Go a completed source scan with a clean "
+            "sum.golang.org checksum verification). A human needs to review this.",
+            "",
+        ]
 
     # Static analysis
     if verdict.static_findings.suspicious_patterns:
@@ -80,6 +87,13 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
                 lines.append(f"- `{a.get('destination', a)}`")
             lines.append("\n</details>")
             lines.append("")
+
+    if dynamic.detector_findings:
+        lines.append("### Runtime Detector Findings")
+        lines.append("")
+        for f in dynamic.detector_findings:
+            lines.append(f"- **{f.get('risk', '?').upper()}** `{f.get('path', '?')}`: {f.get('detail', '')}")
+        lines.append("")
 
     if dynamic.sudo_attempts:
         lines.append("### Privilege Escalation Attempts")

@@ -8,7 +8,7 @@ from pathlib import Path
 from dependabot_plus.analysis.autorun_scan import scan_diff_for_autorun
 from dependabot_plus.analysis.binary_scan import scan_diff_for_new_binaries
 from dependabot_plus.analysis.claude_review import review_diff
-from dependabot_plus.analysis.source_diff import fetch_source_with_dirs
+from dependabot_plus.analysis.source_diff import ChecksumMismatch, fetch_source_with_dirs
 from dependabot_plus.queue.fetch import fetch_and_save
 from dependabot_plus.queue.models import (
     SKIP_DYNAMIC_ECOSYSTEMS,
@@ -23,6 +23,8 @@ from dependabot_plus.queue.models import (
     save_queue,
 )
 from dependabot_plus.report.github import add_label, post_report
+from dependabot_plus.risk import assess
+from dependabot_plus.sandbox.egress import assess_egress
 from dependabot_plus.sandbox.runner import run_sandbox
 
 logging.basicConfig(
@@ -32,6 +34,21 @@ logging.basicConfig(
 log = logging.getLogger("dependabot_plus")
 
 DEFAULT_QUEUE = Path("queue.json")
+DEFAULT_STATIC_VETTED = frozenset({Ecosystem.GO})
+
+
+def parse_static_vetted(value: str | None) -> frozenset:
+    """Parse --static-vetted: ecosystems that may be vetted by deterministic
+    source scans alone (no sandbox). Defaults to Go only (sum.golang.org is an
+    independent check); an explicit empty string disables it. Unknown names are an error."""
+    if value is None:
+        return DEFAULT_STATIC_VETTED
+    if not value.strip():
+        return frozenset()
+    try:
+        return frozenset(Ecosystem(v.strip()) for v in value.split(",") if v.strip())
+    except ValueError as e:
+        raise SystemExit(f"--static-vetted: {e}")
 
 
 def cmd_fetch(args: argparse.Namespace) -> None:
@@ -57,8 +74,10 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     all_items = load_queue(queue_path)
 
-    # Track verdicts per PR to decide labeling
-    pr_verdicts: dict[int, list[RiskLevel]] = {}
+    static_vetted = parse_static_vetted(getattr(args, "static_vetted", None))
+
+    # Track (risk, vetted) per PR to decide labeling
+    pr_verdicts: dict[int, list[tuple[RiskLevel, bool]]] = {}
 
     for item in to_process:
         log.info(
@@ -75,7 +94,8 @@ def cmd_process(args: argparse.Namespace) -> None:
             )
             _update_status(all_items, item, Status.DONE)
             save_queue(all_items, queue_path)
-            pr_verdicts.setdefault(item.pr_number, []).append(RiskLevel.LOW)
+            # No analysis happened: never counts toward the deps-vetted label.
+            pr_verdicts.setdefault(item.pr_number, []).append((RiskLevel.UNKNOWN, False))
             continue
 
         # Update status
@@ -83,30 +103,34 @@ def cmd_process(args: argparse.Namespace) -> None:
         save_queue(all_items, queue_path)
 
         try:
-            verdict = _analyse(item, mode=getattr(args, "mode", "monitor"))
+            verdict = _analyse(
+                item, mode=getattr(args, "mode", "monitor"),
+                static_vetted_ecosystems=static_vetted,
+            )
             post_report(item, verdict)
             _update_status(all_items, item, Status.DONE)
-            pr_verdicts.setdefault(item.pr_number, []).append(verdict.risk_level)
+            pr_verdicts.setdefault(item.pr_number, []).append((verdict.risk_level, verdict.vetted))
             log.info(
                 "PR #%d: risk=%s", item.pr_number, verdict.risk_level.value,
             )
         except Exception:
             log.exception("Failed processing PR #%d", item.pr_number)
             _update_status(all_items, item, Status.FAILED)
-            pr_verdicts.setdefault(item.pr_number, []).append(RiskLevel.UNKNOWN)
+            pr_verdicts.setdefault(item.pr_number, []).append((RiskLevel.UNKNOWN, False))
 
         save_queue(all_items, queue_path)
 
-    # Label PRs where ALL packages passed with LOW risk
+    # Label PRs where ALL packages are LOW *and* backed by deterministic evidence
+    # (an LLM LOW alone never labels; see dependabot_plus/risk.py)
     for pr_number, risks in pr_verdicts.items():
         # Check all items for this PR are done (including ones from prior runs)
         pr_items = [i for i in all_items if i.pr_number == pr_number]
         all_done = all(i.status in (Status.DONE, Status.FAILED) for i in pr_items)
-        all_low = all(r == RiskLevel.LOW for r in risks)
+        all_low = all(r == RiskLevel.LOW and vetted for r, vetted in risks)
 
         if all_done and all_low:
             repo = pr_items[0].repo
-            log.info("PR #%d: all packages LOW — adding deps-vetted label", pr_number)
+            log.info("PR #%d: all packages LOW with deterministic evidence — adding deps-vetted label", pr_number)
             try:
                 add_label(repo, pr_number, "deps-vetted")
             except Exception:
@@ -119,13 +143,16 @@ def cmd_run(args: argparse.Namespace) -> None:
     cmd_process(args)
 
 
-def _analyse(item, mode="monitor"):
+def _analyse(item, mode="monitor", static_vetted_ecosystems=frozenset()):
     """Run static + dynamic + binary analysis and return a Verdict."""
     workdir = None
     diff = ""
     binary_findings = []
     autorun_findings = []
     has_high_autorun = False
+    source_scanned = False
+    integrity_failure = False
+    integrity_detail = ""
 
     # Phase 1: Fetch source diff + binary scan + auto-run config scan
     log.info("  Fetching source diff...")
@@ -152,27 +179,24 @@ def _analyse(item, mode="monitor"):
             )
         autorun_findings = [f.describe() for f in autorun_result.findings]
         has_high_autorun = autorun_result.has_high
+        source_scanned = True
+    except ChecksumMismatch as e:
+        integrity_failure = True
+        integrity_detail = str(e)
+        log.error("  Checksum verification FAILED: %s", e)
     except Exception:
         log.exception("  Source diff failed, continuing with dynamic only")
 
     # Phase 2: Claude static review
     log.info("  Running Claude static review...")
     if diff or binary_findings or autorun_findings:
-        # Include pre-computed findings in the prompt so Claude can factor them in
-        extra = ""
-        if binary_findings:
-            extra += (
-                "\n\nBinary file analysis also found these suspicious files:\n"
-                + "\n".join(f"- {f}" for f in binary_findings)
-            )
-        if autorun_findings:
-            extra += (
-                "\n\nEditor/agent auto-run config analysis flagged these "
-                "(zero-click execution risk):\n"
-                + "\n".join(f"- {f}" for f in autorun_findings)
-            )
+        # Scanner findings go to the model as a separate fenced block, not
+        # concatenated into the diff.
+        scanner_findings = list(binary_findings) + [
+            f"auto-run config (zero-click execution risk): {f}" for f in autorun_findings
+        ]
         static = review_diff(
-            diff + extra, item.package_name, item.ecosystem.value,
+            diff, item.package_name, item.ecosystem.value, scanner_findings,
         )
         # Merge pre-computed findings into static findings
         static.suspicious_patterns.extend(binary_findings)
@@ -182,12 +206,14 @@ def _analyse(item, mode="monitor"):
 
     # Phase 3: Dynamic analysis (sandbox install)
     # Some ecosystems have no install scripts — skip dynamic analysis
-    if item.ecosystem in SKIP_DYNAMIC_ECOSYSTEMS:
+    sandbox_ran = item.ecosystem not in SKIP_DYNAMIC_ECOSYSTEMS
+    if not sandbox_ran:
         log.info("  Skipping dynamic analysis for %s (no install scripts)", item.ecosystem.value)
         dynamic = SandboxResult(install_exit_code=0, install_logs=f"N/A ({item.ecosystem.value})")
     else:
         log.info("  Running sandbox install (mode=%s) ...", mode)
         dynamic = run_sandbox(item, mode=mode)
+        sandbox_ran = dynamic.install_exit_code != -1
 
     # Cleanup source dirs
     if workdir:
@@ -201,10 +227,22 @@ def _analyse(item, mode="monitor"):
     if dynamic.sudo_attempts:
         log.info("  SUDO attempts detected: %d", len(dynamic.sudo_attempts))
 
-    # Determine overall risk
-    risk = _overall_risk(
-        static.risk_level, dynamic, bool(binary_findings), bool(blocked_network),
-        bool(autorun_findings), has_high_autorun,
+    # Determine overall risk: the LLM verdict can only raise what deterministic
+    # signals say, and cannot vet a package on its own.
+    assessment = assess(
+        item.ecosystem, static.risk_level, dynamic,
+        sandbox_ran=sandbox_ran,
+        binary_findings=bool(binary_findings),
+        autorun=bool(autorun_findings),
+        autorun_high=has_high_autorun,
+        blocked_network=bool(blocked_network),
+        integrity_failure=integrity_failure,
+        source_scanned=source_scanned,
+        static_vetted_ecosystems=static_vetted_ecosystems,
+    )
+    risk = assessment.risk
+    egress_findings = assess_egress(
+        item.ecosystem, dynamic.network_attempts, resolved_ips=dynamic.dns_answers,
     )
 
     summary_parts = []
@@ -224,6 +262,14 @@ def _analyse(item, mode="monitor"):
             f"finding(s) (zero-click execution risk)"
             + (" — includes high-severity" if has_high_autorun else "") + "."
         )
+    if integrity_failure:
+        summary_parts.append(
+            f"**Integrity:** Go checksum database verification failed ({integrity_detail[:300]})."
+        )
+    for f in dynamic.detector_findings:
+        summary_parts.append(f"**Runtime detector:** {f.get('detail', f.get('path'))}.")
+    for ef in egress_findings:
+        summary_parts.append(f"**Egress:** {ef.detail} ({ef.risk.value.upper()}).")
     if dynamic.file_accesses:
         summary_parts.append(
             f"**Dynamic:** {len(dynamic.file_accesses)} canary file(s) accessed."
@@ -242,11 +288,16 @@ def _analyse(item, mode="monitor"):
             f"**Install failed** with exit code {dynamic.install_exit_code}."
         )
 
+    if assessment.note:
+        summary_parts.append(f"**Not auto-vetted:** {assessment.note}")
+
     return Verdict(
         risk_level=risk,
         static_findings=static,
         dynamic_findings=dynamic,
         summary=" ".join(summary_parts) or "No issues found.",
+        vetted=assessment.vetted,
+        vetting_note=assessment.note,
     )
 
 
@@ -279,40 +330,6 @@ def _scan_install_logs_for_network(logs: str) -> list[str]:
     return findings
 
 
-def _overall_risk(
-    static_risk, dynamic, has_suspicious_binaries=False, has_blocked_network=False,
-    has_autorun=False, has_high_autorun=False,
-):
-    """Combine static and dynamic signals into an overall risk level."""
-    if dynamic.file_accesses:
-        return RiskLevel.HIGH
-    if dynamic.sudo_attempts:
-        return RiskLevel.HIGH
-    # Zero-click auto-run config (VS Code folderOpen task, agent hooks) that is
-    # stealthy or runs a stager is HIGH; any auto-run config is at least MEDIUM.
-    if has_high_autorun:
-        return RiskLevel.HIGH
-    # HTTP requests with POST/PUT (data exfiltration) are HIGH
-    # Any HTTP to non-registry hosts is at least MEDIUM
-    http_reqs = [a for a in dynamic.network_attempts if a.get("type") == "http"]
-    exfil_methods = [r for r in http_reqs if r.get("method") in ("POST", "PUT", "PATCH")]
-    if exfil_methods:
-        return RiskLevel.HIGH
-    if http_reqs:
-        return RiskLevel.MEDIUM
-    if has_blocked_network:
-        return RiskLevel.MEDIUM
-    if has_autorun:
-        return RiskLevel.MEDIUM
-    if has_suspicious_binaries:
-        return RiskLevel.MEDIUM if static_risk != RiskLevel.HIGH else RiskLevel.HIGH
-    if static_risk == RiskLevel.HIGH:
-        return RiskLevel.HIGH
-    if static_risk == RiskLevel.MEDIUM:
-        return RiskLevel.MEDIUM
-    return static_risk
-
-
 def _update_status(all_items, item, new_status):
     for i in all_items:
         if (i.repo == item.repo
@@ -320,6 +337,14 @@ def _update_status(all_items, item, new_status):
                 and i.package_name == item.package_name):
             i.status = new_status
             break
+
+
+_STATIC_VETTED_HELP = (
+    "Comma-separated ecosystems (e.g. go,docker) that may earn deps-vetted from "
+    "deterministic source scans without a sandbox. Default: go (needs a completed "
+    "source scan and a clean sum.golang.org checksum verification). Docker and "
+    "GitHub Actions always need a human unless listed. Pass \"\" to disable all."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -347,8 +372,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     proc.add_argument(
         "--mode", choices=["monitor", "strict"], default="monitor",
-        help="Sandbox mode: monitor (network+tcpdump) or strict (no network)",
+        help="Sandbox mode: monitor (network on, egress logged and scored) or strict (--network=none)",
     )
+    proc.add_argument("--static-vetted", default=None, metavar="ECOSYSTEMS", help=_STATIC_VETTED_HELP)
 
     run = sub.add_parser("run", help="Fetch and process (full pipeline)")
     run.add_argument(
@@ -357,8 +383,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--mode", choices=["monitor", "strict"], default="monitor",
-        help="Sandbox mode: monitor (network+tcpdump) or strict (no network)",
+        help="Sandbox mode: monitor (network on, egress logged and scored) or strict (--network=none)",
     )
+    run.add_argument("--static-vetted", default=None, metavar="ECOSYSTEMS", help=_STATIC_VETTED_HELP)
 
     return parser
 
