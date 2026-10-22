@@ -5,7 +5,7 @@ import argparse
 from unittest.mock import patch
 
 from dependabot_plus import cli
-from dependabot_plus.analysis.source_diff import ChecksumMismatch
+from dependabot_plus.analysis.source_diff import ChecksumMismatch, GoDownloadFailed
 from dependabot_plus.queue.models import (
     Ecosystem, QueueItem, RiskLevel, SandboxResult, StaticFindings, Status, Verdict, load_queue, save_queue,
 )
@@ -43,6 +43,44 @@ def test_low_llm_verdict_with_high_sandbox_signal_is_high():
 def test_low_llm_verdict_on_no_sandbox_ecosystem_is_not_vetted():
     v = _analyse(_item(Ecosystem.GO), RiskLevel.LOW)
     assert v.risk_level == RiskLevel.LOW and not v.vetted
+
+
+def _default_vetted(eco_value=None):
+    return cli.parse_static_vetted(eco_value)
+
+
+def test_go_vetted_by_default_with_sumdb_ok():
+    v = _analyse(_item(Ecosystem.GO), RiskLevel.LOW, static_vetted_ecosystems=_default_vetted())
+    assert v.risk_level == RiskLevel.LOW and v.vetted
+
+
+def test_go_not_vetted_on_checksum_mismatch_by_default():
+    v = _analyse(_item(Ecosystem.GO), RiskLevel.LOW, fetch=ChecksumMismatch("mismatch"),
+                 static_vetted_ecosystems=_default_vetted())
+    assert v.risk_level == RiskLevel.HIGH and not v.vetted
+
+
+def test_go_not_vetted_when_download_never_verified():
+    v = _analyse(_item(Ecosystem.GO), RiskLevel.LOW, fetch=GoDownloadFailed("offline"),
+                 static_vetted_ecosystems=_default_vetted())
+    assert not v.vetted
+
+
+def test_docker_and_actions_not_vetted_by_default():
+    for eco in (Ecosystem.DOCKER, Ecosystem.GITHUB_ACTIONS):
+        v = _analyse(_item(eco), RiskLevel.LOW, static_vetted_ecosystems=_default_vetted())
+        assert v.risk_level == RiskLevel.LOW and not v.vetted, eco
+
+
+def test_empty_static_vetted_disables_go():
+    assert _default_vetted("") == frozenset()
+    v = _analyse(_item(Ecosystem.GO), RiskLevel.LOW, static_vetted_ecosystems=_default_vetted(""))
+    assert not v.vetted
+
+
+def test_static_vetted_default_is_go_only_and_overridable():
+    assert _default_vetted() == frozenset({Ecosystem.GO})
+    assert _default_vetted("go,docker") == frozenset({Ecosystem.GO, Ecosystem.DOCKER})
 
 
 def test_go_checksum_mismatch_is_high():

@@ -4,6 +4,8 @@
 
 DependabotPlus analyses Dependabot PRs for supply chain attacks. Two-phase pipeline: fetch a queue of PRs, then process each through static analysis (Claude) and dynamic analysis (Docker sandbox with canary traps).
 
+`deps-vetted` needs deterministic evidence: a clean sandbox run, or a `--static-vetted` ecosystem (default `go`: completed source scan AND clean `go mod download` sum.golang.org verification; a mismatch is HIGH, a failed download is never vetted). Docker and GitHub Actions always need a human unless explicitly listed; `--static-vetted ""` disables static vetting.
+
 ## Commands
 
 ```bash

@@ -29,7 +29,8 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
     if verdict.risk_level == RiskLevel.LOW and not verdict.vetted:
         lines[5:5] = [
             "> **Not eligible for `deps-vetted`:** no deterministic evidence of safety "
-            "(a clean sandbox run or an explicit per-ecosystem rule). A human needs to review this.",
+            "(a clean sandbox run, or for Go a completed source scan with a clean "
+            "sum.golang.org checksum verification). A human needs to review this.",
             "",
         ]
 

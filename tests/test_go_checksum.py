@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dependabot_plus.analysis import source_diff
-from dependabot_plus.analysis.source_diff import ChecksumMismatch, _fetch_go_diff
+from dependabot_plus.analysis.source_diff import ChecksumMismatch, GoDownloadFailed, _fetch_go_diff
 
 MISMATCH = (
     "verifying github.com/foo/bar@v1.2.3: checksum mismatch\n"
@@ -20,6 +20,7 @@ def test_script_does_not_disable_checksum_database():
     script = source_diff._go_download_script("github.com/foo/bar", "v1.2.3")
     assert "GONOSUMDB" not in script
     assert "GONOSUMCHECK" not in script
+    assert "|| exit 1" in script  # a failed download must not look like an empty success
     assert "GOFLAGS=-insecure" not in script
 
 
@@ -41,5 +42,5 @@ def test_checksum_mismatch_raises(tmp_path):
 def test_other_download_failure_is_not_a_mismatch(tmp_path):
     proc = MagicMock(returncode=1, stdout="", stderr="dial tcp: lookup proxy.golang.org: no such host")
     with patch("dependabot_plus.analysis.source_diff.subprocess.run", return_value=proc):
-        out = _fetch_go_diff("github.com/foo/bar", "1.2.2", "1.2.3", str(tmp_path))
-    assert "unavailable" in out
+        with pytest.raises(GoDownloadFailed):
+            _fetch_go_diff("github.com/foo/bar", "1.2.2", "1.2.3", str(tmp_path))

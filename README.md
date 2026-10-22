@@ -33,12 +33,12 @@ Use `strict` when a leak is unacceptable; use `monitor` when you want to see whe
 ### Limits
 
 - `monitor` mode does not block egress and does not decrypt TLS.
-- Go, Docker and GitHub Actions have no sandbox step (no install scripts). Their LLM-only LOW is **not** enough for `deps-vetted`; opt in per ecosystem with `--static-vetted go,docker,github_actions` to let deterministic source scans (binary and auto-run scans, plus Go checksum verification) vet them, or review by hand.
+- Go, Docker and GitHub Actions have no sandbox step (no install scripts), so an LLM-only LOW is **not** enough for `deps-vetted`. Go is vetted statically by default (`--static-vetted go`): it needs a completed source scan (binary and auto-run scans) **and** a clean `go mod download` verification against sum.golang.org, which is an independent check; a checksum mismatch is HIGH and a failed or incomplete download is never vetted. Docker and GitHub Actions still need a human review. Override with `--static-vetted go,docker,github_actions` to widen it, or `--static-vetted ""` to disable static vetting entirely.
 - Go modules are verified against `sum.golang.org` (no `GONOSUMDB`); a checksum mismatch is HIGH.
 
 ## How risk is decided
 
-Deterministic signals (sandbox, runtime detectors, egress, binary and auto-run scans, checksum verification) set a floor. The `claude -p` verdict can **raise** risk above that floor but never lower it. The diff is passed to Claude fenced as untrusted data, because it is attacker-controlled. `deps-vetted` requires LOW risk plus a clean sandbox run (or an explicit `--static-vetted` rule); otherwise the PR comment says a human must review.
+Deterministic signals (sandbox, runtime detectors, egress, binary and auto-run scans, checksum verification) set a floor. The `claude -p` verdict can **raise** risk above that floor but never lower it. The diff is passed to Claude fenced as untrusted data, because it is attacker-controlled. `deps-vetted` requires LOW risk plus a clean sandbox run (or, for Go by default, a completed source scan plus clean sumdb verification; see `--static-vetted`); otherwise the PR comment says a human must review.
 
 ## Supported ecosystems
 

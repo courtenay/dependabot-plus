@@ -140,6 +140,10 @@ class ChecksumMismatch(Exception):
     """Go's checksum database rejected a downloaded module (treated as HIGH risk)."""
 
 
+class GoDownloadFailed(Exception):
+    """`go mod download` did not complete, so the module was never checksum-verified."""
+
+
 _GO_CHECKSUM_FAILURE_MARKERS = ("checksum mismatch", "SECURITY ERROR")
 
 
@@ -149,7 +153,7 @@ def _go_download_script(package: str, v: str) -> str:
     # a mismatch can be detected.
     return (
         "export GOPATH=/tmp/gopath GOSUMDB=sum.golang.org GOTOOLCHAIN=auto && "
-        f"go mod download {package}@{v} 1>&2; "
+        f"go mod download {package}@{v} 1>&2 || exit 1; "
         # Find the cached module directory and copy contents to /work
         f"moddir=$(find /tmp/gopath/pkg/mod -maxdepth 4 -type d -name '*@{v}*' | head -1) && "
         "if [ -n \"$moddir\" ]; then cp -r \"$moddir\"/* /work/ 2>/dev/null; fi"
@@ -186,13 +190,20 @@ def _fetch_go_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> st
                 f"checksum database verification failed for {package}@{v}: "
                 + (proc.stderr or proc.stdout)[:500]
             )
+        if proc.returncode != 0:
+            # Not a mismatch, but the download was never verified: callers must
+            # not treat the source as scanned (so Go cannot be statically vetted).
+            raise GoDownloadFailed(
+                f"go mod download failed for {package}@{v}: "
+                + (proc.stderr or proc.stdout)[:500]
+            )
 
     # Check if we got anything
     old_has_files = os.path.isdir(old_dir) and os.listdir(old_dir)
     new_has_files = os.path.isdir(new_dir) and os.listdir(new_dir)
     if old_has_files and new_has_files:
         return _diff_dirs(old_dir, new_dir)
-    return "(go module diff unavailable — source could not be fetched)"
+    raise GoDownloadFailed(f"go module source for {package} could not be fetched")
 
 
 def _fetch_pip_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> str:

@@ -34,12 +34,16 @@ logging.basicConfig(
 log = logging.getLogger("dependabot_plus")
 
 DEFAULT_QUEUE = Path("queue.json")
+DEFAULT_STATIC_VETTED = frozenset({Ecosystem.GO})
 
 
 def parse_static_vetted(value: str | None) -> frozenset:
     """Parse --static-vetted: ecosystems that may be vetted by deterministic
-    source scans alone (no sandbox). Empty by default; unknown names are an error."""
-    if not value:
+    source scans alone (no sandbox). Defaults to Go only (sum.golang.org is an
+    independent check); an explicit empty string disables it. Unknown names are an error."""
+    if value is None:
+        return DEFAULT_STATIC_VETTED
+    if not value.strip():
         return frozenset()
     try:
         return frozenset(Ecosystem(v.strip()) for v in value.split(",") if v.strip())
@@ -337,8 +341,9 @@ def _update_status(all_items, item, new_status):
 
 _STATIC_VETTED_HELP = (
     "Comma-separated ecosystems (e.g. go,docker) that may earn deps-vetted from "
-    "deterministic source scans without a sandbox. Default: none, so those "
-    "ecosystems always need a human."
+    "deterministic source scans without a sandbox. Default: go (needs a completed "
+    "source scan and a clean sum.golang.org checksum verification). Docker and "
+    "GitHub Actions always need a human unless listed. Pass \"\" to disable all."
 )
 
 
