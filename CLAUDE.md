@@ -31,6 +31,7 @@ pytest
 - `dependabot_plus/sandbox/runner.py` — runs Docker containers with canary traps (`--network=none` in strict mode only; default `monitor` has network on)
 - `dependabot_plus/sandbox/egress.py` — per-ecosystem registry allowlist; scores DNS/TCP/HTTP to other hosts
 - `dependabot_plus/sandbox/detectors.py` — `RuntimeDetector` interface + inotify write detector (Falco seam)
+- `dependabot_plus/sandbox/falco.py` + `falco_rules/rules.yaml` — opt-in `--falco shadow`: privileged Falco sidecar per vet run (digest-pinned); findings are `shadow=True`, listed in the report, never scored
 - `dependabot_plus/risk.py` — combines signals; LLM can raise but never lower; decides `vetted`
 - `dependabot_plus/report/github.py` — posts findings as markdown PR comments via `gh`
 - `tests/fixtures/malicious_packages/` — test fixture packages (file-scanner, env-stealer, clean-pkg)

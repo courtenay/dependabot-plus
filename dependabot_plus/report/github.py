@@ -12,6 +12,34 @@ _RISK_ICONS = {
 }
 
 
+def _falco_section(dynamic, scored: list[dict]) -> list[str]:
+    """Collapsed shadow-mode section: Falco findings beside the scored detectors' findings."""
+    if not dynamic.falco:
+        return []
+    state = dynamic.falco.get("state", "unverified")
+    reason = dynamic.falco.get("reason", "")
+    shadow = [f for f in dynamic.detector_findings if f.get("shadow")]
+    label = {"ok": "verified", "unverified": "UNVERIFIED", "unavailable": "unavailable"}.get(state, state)
+    out = [
+        f"<details><summary>Falco (shadow, not scored): {label}, {len(shadow)} finding(s)</summary>",
+        "",
+        "Shadow mode: Falco records findings for comparison. They do not change the risk "
+        "level or the `deps-vetted` label.",
+        "",
+    ]
+    if reason:
+        out += [f"**{state.capitalize()}:** {reason}", ""]
+    out.append(f"Scored detectors ({len(scored)}):")
+    out += [f"- `{f.get('path', '?')}`: {f.get('detail', '')}" for f in scored] or ["- none"]
+    out += ["", f"Falco ({len(shadow)}):"]
+    out += [
+        f"- **{f.get('risk', '?').upper()}** [{f.get('phase') or '?'}] `{f.get('path', '?')}`: {f.get('detail', '')}"
+        for f in shadow
+    ] or ["- none"]
+    out += ["", "</details>", ""]
+    return out
+
+
 def format_report(item: QueueItem, verdict: Verdict) -> str:
     """Format a verdict as a markdown PR comment."""
     icon = _RISK_ICONS.get(verdict.risk_level, "⚪")
@@ -88,12 +116,15 @@ def format_report(item: QueueItem, verdict: Verdict) -> str:
             lines.append("\n</details>")
             lines.append("")
 
-    if dynamic.detector_findings:
+    scored = [f for f in dynamic.detector_findings if not f.get("shadow")]
+    if scored:
         lines.append("### Runtime Detector Findings")
         lines.append("")
-        for f in dynamic.detector_findings:
+        for f in scored:
             lines.append(f"- **{f.get('risk', '?').upper()}** `{f.get('path', '?')}`: {f.get('detail', '')}")
         lines.append("")
+
+    lines.extend(_falco_section(dynamic, scored))
 
     if dynamic.sudo_attempts:
         lines.append("### Privilege Escalation Attempts")

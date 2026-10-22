@@ -6,10 +6,9 @@ A detector has two halves:
   * ``evaluate(output, ecosystem)`` - turns the container's JSON output into
     ``DetectorFinding``s that the risk policy scores.
 
-``InotifyWriteDetector`` is the minimal implementation. A Falco-backed detector
-would implement the same ``RuntimeDetector`` protocol (read Falco's event
-stream in ``evaluate``) and replace it in ``default_detectors()``; nothing else
-needs to change.
+``InotifyWriteDetector`` is the minimal implementation. ``FalcoDetector``
+(sandbox/falco.py) implements the same protocol in shadow mode: its findings
+carry ``shadow=True`` and the risk policy ignores them.
 """
 from __future__ import annotations
 
@@ -27,6 +26,10 @@ class DetectorFinding:
     risk: RiskLevel
     category: str
     detail: str
+    # Shadow findings are recorded and reported but never scored (see risk.assess).
+    shadow: bool = False
+    # "install" / "post_install" when the detector can tell; "" otherwise.
+    phase: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -63,6 +66,14 @@ _SHELL_RC = {
     ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
     ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".inputrc",
 }
+
+
+def write_allowlist(ecosystem: Ecosystem, home: str = "/home/sandbox") -> list[str]:
+    """Path prefixes where writes are expected for ``ecosystem`` (shared with the Falco rules)."""
+    allowed = list(_ALWAYS_ALLOWED)
+    allowed.extend(_SYSTEM_ALLOWED.get(ecosystem, ()))
+    allowed.extend(f"{home}/{rel}" for rel in _HOME_ALLOWED.get(ecosystem, ()))
+    return allowed
 
 
 def _under(path: str, prefix: str) -> bool:

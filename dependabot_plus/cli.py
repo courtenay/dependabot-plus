@@ -106,6 +106,7 @@ def cmd_process(args: argparse.Namespace) -> None:
             verdict = _analyse(
                 item, mode=getattr(args, "mode", "monitor"),
                 static_vetted_ecosystems=static_vetted,
+                falco=getattr(args, "falco", "off"),
             )
             post_report(item, verdict)
             _update_status(all_items, item, Status.DONE)
@@ -143,7 +144,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     cmd_process(args)
 
 
-def _analyse(item, mode="monitor", static_vetted_ecosystems=frozenset()):
+def _analyse(item, mode="monitor", static_vetted_ecosystems=frozenset(), falco="off"):
     """Run static + dynamic + binary analysis and return a Verdict."""
     workdir = None
     diff = ""
@@ -212,7 +213,10 @@ def _analyse(item, mode="monitor", static_vetted_ecosystems=frozenset()):
         dynamic = SandboxResult(install_exit_code=0, install_logs=f"N/A ({item.ecosystem.value})")
     else:
         log.info("  Running sandbox install (mode=%s) ...", mode)
-        dynamic = run_sandbox(item, mode=mode)
+        if falco == "off":
+            dynamic = run_sandbox(item, mode=mode)
+        else:
+            dynamic = run_sandbox(item, mode=mode, falco=falco)
         sandbox_ran = dynamic.install_exit_code != -1
 
     # Cleanup source dirs
@@ -267,6 +271,8 @@ def _analyse(item, mode="monitor", static_vetted_ecosystems=frozenset()):
             f"**Integrity:** Go checksum database verification failed ({integrity_detail[:300]})."
         )
     for f in dynamic.detector_findings:
+        if f.get("shadow"):
+            continue
         summary_parts.append(f"**Runtime detector:** {f.get('detail', f.get('path'))}.")
     for ef in egress_findings:
         summary_parts.append(f"**Egress:** {ef.detail} ({ef.risk.value.upper()}).")
@@ -347,6 +353,12 @@ _STATIC_VETTED_HELP = (
 )
 
 
+_FALCO_HELP = (
+    "shadow: run a Falco sidecar (privileged, modern eBPF) and list its findings in the report "
+    "next to the built-in detectors. Never changes risk or deps-vetted. Default: off."
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dependabot-plus",
@@ -374,6 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", choices=["monitor", "strict"], default="monitor",
         help="Sandbox mode: monitor (network on, egress logged and scored) or strict (--network=none)",
     )
+    proc.add_argument("--falco", choices=["off", "shadow"], default="off", help=_FALCO_HELP)
     proc.add_argument("--static-vetted", default=None, metavar="ECOSYSTEMS", help=_STATIC_VETTED_HELP)
 
     run = sub.add_parser("run", help="Fetch and process (full pipeline)")
@@ -385,6 +398,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", choices=["monitor", "strict"], default="monitor",
         help="Sandbox mode: monitor (network on, egress logged and scored) or strict (--network=none)",
     )
+    run.add_argument("--falco", choices=["off", "shadow"], default="off", help=_FALCO_HELP)
     run.add_argument("--static-vetted", default=None, metavar="ECOSYSTEMS", help=_STATIC_VETTED_HELP)
 
     return parser

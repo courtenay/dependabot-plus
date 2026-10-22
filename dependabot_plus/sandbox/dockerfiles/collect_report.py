@@ -87,6 +87,7 @@ def build_report(log_dir, install_exit, install_end):
     tcp, tcp_post = parse_tcp(_read(log_dir, "network.log"), install_end)
     return {
         "install_exit_code": install_exit,
+        "install_end": install_end,
         "install_log": _read(log_dir, "install.log")[-10000:],
         "file_accesses": _lines(_read(log_dir, "canary.log")),
         "file_writes": _lines(_read(log_dir, "writes.log")),

@@ -64,6 +64,8 @@ def assess(
     elif autorun:
         bump(RiskLevel.MEDIUM, "editor/agent auto-run config")
     for f in dynamic.detector_findings:
+        if f.get("shadow"):
+            continue  # shadow detectors (Falco) are recorded, never scored
         try:
             level = RiskLevel(f.get("risk", "high"))
         except ValueError:

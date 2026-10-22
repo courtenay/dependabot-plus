@@ -27,3 +27,6 @@ markers = [
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
+
+[tool.setuptools.package-data]
+"dependabot_plus.sandbox" = ["falco_rules/*.yaml", "dockerfiles/*"]
