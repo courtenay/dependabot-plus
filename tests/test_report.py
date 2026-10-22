@@ -206,3 +206,18 @@ class TestPostReport:
             mock_run.side_effect = subprocess.CalledProcessError(1, "gh")
             with pytest.raises(subprocess.CalledProcessError):
                 post_report(item, verdict)
+
+
+def test_report_flags_unvetted_low_and_detector_findings():
+    from dependabot_plus.queue.models import Ecosystem, QueueItem, RiskLevel, SandboxResult, StaticFindings, Verdict
+    from dependabot_plus.report.github import format_report
+
+    item = QueueItem("o/r", 1, Ecosystem.GO, "pkg", "1.0.0", "1.0.1")
+    unvetted = Verdict(RiskLevel.LOW, StaticFindings(), SandboxResult(0, ""), "s", vetted=False)
+    assert "Not eligible for `deps-vetted`" in format_report(item, unvetted)
+    vetted = Verdict(RiskLevel.LOW, StaticFindings(), SandboxResult(0, ""), "s", vetted=True)
+    assert "Not eligible" not in format_report(item, vetted)
+    dyn = SandboxResult(0, "", detector_findings=[
+        {"kind": "file_write", "path": "/home/sandbox/.bashrc", "risk": "high", "category": "shell_rc", "detail": "d"}])
+    out = format_report(item, Verdict(RiskLevel.HIGH, StaticFindings(), dyn, "s"))
+    assert "Runtime Detector Findings" in out and "/home/sandbox/.bashrc" in out

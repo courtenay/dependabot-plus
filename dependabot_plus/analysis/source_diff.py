@@ -136,6 +136,30 @@ def _fetch_apt_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> s
     return "(apt source diff unavailable — source packages could not be fetched)"
 
 
+class ChecksumMismatch(Exception):
+    """Go's checksum database rejected a downloaded module (treated as HIGH risk)."""
+
+
+_GO_CHECKSUM_FAILURE_MARKERS = ("checksum mismatch", "SECURITY ERROR")
+
+
+def _go_download_script(package: str, v: str) -> str:
+    # Checksum verification stays on: GOSUMDB is pinned to sum.golang.org and no
+    # sumdb-bypass variables are set. go output goes to stderr (unsuppressed) so
+    # a mismatch can be detected.
+    return (
+        "export GOPATH=/tmp/gopath GOSUMDB=sum.golang.org GOTOOLCHAIN=auto && "
+        f"go mod download {package}@{v} 1>&2; "
+        # Find the cached module directory and copy contents to /work
+        f"moddir=$(find /tmp/gopath/pkg/mod -maxdepth 4 -type d -name '*@{v}*' | head -1) && "
+        "if [ -n \"$moddir\" ]; then cp -r \"$moddir\"/* /work/ 2>/dev/null; fi"
+    )
+
+
+def _go_checksum_failed(output: str) -> bool:
+    return any(m in output for m in _GO_CHECKSUM_FAILURE_MARKERS)
+
+
 def _fetch_go_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> str:
     """Go module diffing — uses a Go container to download module source."""
     old_dir = os.path.join(workdir, "old", "src")
@@ -147,14 +171,8 @@ def _fetch_go_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> st
     for d, ver in [(old_dir, old_ver), (new_dir, new_ver)]:
         v = ver if ver.startswith("v") else f"v{ver}"
         # Download module, then find and copy the cached source
-        script = (
-            f"export GOPATH=/tmp/gopath GONOSUMCHECK=* GONOSUMDB=* GOTOOLCHAIN=auto && "
-            f"go mod download {package}@{v} 2>/dev/null; "
-            # Find the cached module directory and copy contents to /work
-            f"moddir=$(find /tmp/gopath/pkg/mod -maxdepth 4 -type d -name '*@{v}*' | head -1) && "
-            f"if [ -n \"$moddir\" ]; then cp -r \"$moddir\"/* /work/ 2>/dev/null; fi"
-        )
-        subprocess.run(
+        script = _go_download_script(package, v)
+        proc = subprocess.run(
             [
                 "docker", "run", "--rm",
                 "-v", f"{d}:/work",
@@ -163,6 +181,11 @@ def _fetch_go_diff(package: str, old_ver: str, new_ver: str, workdir: str) -> st
             ],
             capture_output=True, text=True, timeout=120,
         )
+        if _go_checksum_failed(f"{proc.stdout}\n{proc.stderr}"):
+            raise ChecksumMismatch(
+                f"checksum database verification failed for {package}@{v}: "
+                + (proc.stderr or proc.stdout)[:500]
+            )
 
     # Check if we got anything
     old_has_files = os.path.isdir(old_dir) and os.listdir(old_dir)
@@ -308,7 +331,11 @@ def fetch_source_with_dirs(item: QueueItem) -> tuple[str, str, str, str]:
     mod = sys.modules[__name__]
     workdir = tempfile.mkdtemp(prefix="depbot_diff_")
     fetcher = getattr(mod, _FETCHER_NAMES[item.ecosystem])
-    diff = fetcher(item.package_name, item.old_version, item.new_version, workdir)
+    try:
+        diff = fetcher(item.package_name, item.old_version, item.new_version, workdir)
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     subdir = _SOURCE_SUBDIRS.get(item.ecosystem, "")
     old_dir = os.path.join(workdir, "old", subdir)
     new_dir = os.path.join(workdir, "new", subdir)

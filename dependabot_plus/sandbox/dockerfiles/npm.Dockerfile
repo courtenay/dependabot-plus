@@ -13,6 +13,7 @@ COPY fake_sudo.sh /usr/local/bin/sudo
 RUN chmod +x /usr/local/bin/sudo
 
 COPY entrypoint.sh /entrypoint.sh
+COPY collect_report.py /collect_report.py
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /sandbox

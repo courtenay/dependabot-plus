@@ -26,7 +26,10 @@ pytest
 - `dependabot_plus/analysis/claude_review.py` — sends diffs to `claude -p` for security review
 - `dependabot_plus/sandbox/canary.py` — generates fake secrets (env vars + credential files)
 - `dependabot_plus/sandbox/dockerfiles/` — per-ecosystem Dockerfiles with inotifywait monitoring
-- `dependabot_plus/sandbox/runner.py` — runs Docker containers with `--network=none` and canary traps
+- `dependabot_plus/sandbox/runner.py` — runs Docker containers with canary traps (`--network=none` in strict mode only; default `monitor` has network on)
+- `dependabot_plus/sandbox/egress.py` — per-ecosystem registry allowlist; scores DNS/TCP/HTTP to other hosts
+- `dependabot_plus/sandbox/detectors.py` — `RuntimeDetector` interface + inotify write detector (Falco seam)
+- `dependabot_plus/risk.py` — combines signals; LLM can raise but never lower; decides `vetted`
 - `dependabot_plus/report/github.py` — posts findings as markdown PR comments via `gh`
 - `tests/fixtures/malicious_packages/` — test fixture packages (file-scanner, env-stealer, clean-pkg)
 

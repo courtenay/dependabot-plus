@@ -8,13 +8,14 @@ import tempfile
 
 from dependabot_plus.queue.models import Ecosystem, QueueItem, SandboxResult
 from dependabot_plus.sandbox.builder import build_sandbox_image, image_tag
-
-log = logging.getLogger("dependabot_plus")
 from dependabot_plus.sandbox.canary import (
     CANARY_FILE_PATHS,
     generate_canary_env,
     generate_canary_files,
 )
+from dependabot_plus.sandbox.detectors import RuntimeDetector, default_detectors
+
+log = logging.getLogger("dependabot_plus")
 
 _INSTALL_COMMANDS = {
     Ecosystem.NPM: lambda pkg, ver: f"npm install {pkg}@{ver}",
@@ -256,6 +257,7 @@ def _run_container(
     ecosystem: Ecosystem,
     extra_volumes: list[tuple[str, str]] | None = None,
     mode: str = "monitor",
+    detectors: list[RuntimeDetector] | None = None,
 ) -> SandboxResult:
     """Core container execution with canary traps.
 
@@ -263,6 +265,7 @@ def _run_container(
     mode="monitor": network enabled, tcpdump runs inside the container
                     capturing DNS lookups and TCP connections
     """
+    detectors = default_detectors() if detectors is None else detectors
     canary_env = generate_canary_env()
     canary_files = generate_canary_files()
 
@@ -284,6 +287,10 @@ def _run_container(
         "-e", f"CANARY_WATCH_PATHS={chr(10).join(CANARY_FILE_PATHS)}",
     ])
 
+    for detector in detectors:
+        for key, value in detector.container_env().items():
+            cmd.extend(["-e", f"{key}={value}"])
+
     for key, value in canary_env.items():
         cmd.extend(["-e", f"{key}={value}"])
 
@@ -299,21 +306,36 @@ def _run_container(
     )
 
     # Parse network capture — all traffic logged, HTTP requests are high signal
+    # Events seen after the install command exited carry phase="post_install"
+    # (scored HIGH when non-allowlisted); everything else is "install".
+    post_dns = set(output.get("dns_queries_post_install", []))
+    post_tcp = set(output.get("tcp_connections_post_install", []))
     network_attempts = []
     for req in output.get("http_requests", []):
         network_attempts.append({"type": "http", **req})
     for query in output.get("dns_queries", []):
-        network_attempts.append({"type": "dns", "query": query})
+        network_attempts.append({
+            "type": "dns", "query": query,
+            "phase": "post_install" if query in post_dns else "install",
+        })
     for conn in output.get("tcp_connections", []):
-        network_attempts.append({"type": "tcp", "destination": conn})
+        network_attempts.append({
+            "type": "tcp", "destination": conn,
+            "phase": "post_install" if conn in post_tcp else "install",
+        })
+
+    detector_findings = []
+    for detector in detectors:
+        detector_findings.extend(f.to_dict() for f in detector.evaluate(output, ecosystem))
 
     sudo_attempts = output.get("sudo_attempts", [])
 
     exit_code = output.get("install_exit_code", result.returncode)
     log.info(
         "  Sandbox finished: exit_code=%d, canary_accesses=%d, "
-        "network_events=%d, sudo_attempts=%d",
+        "network_events=%d, sudo_attempts=%d, detector_findings=%d",
         exit_code, len(access_dicts), len(network_attempts), len(sudo_attempts),
+        len(detector_findings),
     )
 
     return SandboxResult(
@@ -322,6 +344,8 @@ def _run_container(
         file_accesses=access_dicts,
         network_attempts=network_attempts,
         sudo_attempts=sudo_attempts,
+        detector_findings=detector_findings,
+        dns_answers=output.get("dns_answers", {}),
     )
 
 
